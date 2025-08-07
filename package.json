@@ -1,0 +1,57 @@
+{
+  "name": "@logistically/events",
+  "version": "2.0.0",
+  "description": "A production-ready event-driven architecture library for NestJS with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/onwello/events.git"
+  },
+  "keywords": [
+    "nestjs",
+    "events",
+    "redis",
+    "streams",
+    "typescript",
+    "microservices",
+    "event-driven",
+    "batching",
+    "validation",
+    "idempotency"
+  ],
+  "author": "Onwello Team",
+  "license": "MIT",
+  "homepage": "https://github.com/onwello/events#readme",
+  "bugs": {
+    "url": "https://github.com/onwello/events/issues"
+  },
+  "files": [
+    "dist"
+  ],
+  "peerDependencies": {
+    "@nestjs/microservices": "^10.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/microservices": "^10.0.0",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.0.14",
+    "jest": "^30.0.4",
+    "ts-jest": "^29.4.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "ioredis": "^5.6.1",
+    "uuid": "^11.1.0",
+    "zod": "^4.0.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
