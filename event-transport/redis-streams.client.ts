@@ -53,4 +53,21 @@ export class RedisStreamsClientProxy extends ClientProxy {
     // Not implemented: request-response pattern for streams
     return () => {};
   }
+
+  public emit(pattern: string, data: any): any {
+    // Return an Observable that resolves immediately
+    return {
+      subscribe: (observer: any) => {
+        this.dispatchEvent({ pattern, data })
+          .then(() => {
+            if (observer.next) observer.next(data);
+            if (observer.complete) observer.complete();
+          })
+          .catch((error) => {
+            if (observer.error) observer.error(error);
+          });
+        return { unsubscribe: () => {} };
+      }
+    };
+  }
 } 

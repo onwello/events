@@ -25,7 +25,13 @@ export interface EventPublisherOptions {
   eventNamespace?: string; // If not provided, uses originServiceName as namespace
 }
 
-export class EventPublisher {
+// Interface for batching strategies to access EventPublisher methods
+export interface EventPublisherInterface {
+  getTransportForEvent(eventType: string): { transport: ClientProxy, prefix?: string };
+  publish<T>(eventType: string, body: T): Promise<void>;
+}
+
+export class EventPublisher implements EventPublisherInterface {
   private validator: EventValidator;
   private eventNamespace: string; // Now required - either explicit or derived from service name
 
@@ -53,7 +59,8 @@ export class EventPublisher {
     return this.routingConfig.routes.find(route => route.pattern.test(eventType));
   }
 
-  private getTransportForEvent(eventType: string): { transport: ClientProxy, prefix?: string } {
+  // Made public for batching strategies
+  public getTransportForEvent(eventType: string): { transport: ClientProxy, prefix?: string } {
     const route = this.getRouteForEvent(eventType);
     if (route) {
       return { transport: this.transports[route.transport], prefix: route.prefix };
@@ -83,8 +90,16 @@ export class EventPublisher {
     // If the transport supports stream override, pass it
     if (typeof (transport as any).dispatchEvent === 'function') {
       await (transport as any).dispatchEvent({ pattern: finalEventType, data: envelope }, { stream });
+    } else if (typeof transport.emit === 'function') {
+      const result = transport.emit(finalEventType, envelope);
+      if (result && typeof result.subscribe === 'function') {
+        await firstValueFrom(result);
+      } else {
+        // Handle case where emit doesn't return an Observable
+        await Promise.resolve();
+      }
     } else {
-      await firstValueFrom(transport.emit(finalEventType, envelope));
+      throw new Error('Transport does not support emit or dispatchEvent');
     }
   }
 

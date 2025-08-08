@@ -7,6 +7,7 @@ export interface EventRoute {
 const eventRoutingConfig = {
   default: 'console',
   routes: [
+    { pattern: /^TEST\./, transport: 'redis', prefix: 'test-events:' },
     { pattern: /^user\.otp_/, transport: 'redis', prefix: 'user-events:' },
     { pattern: /^user\.register_/, transport: 'redis', prefix: 'user-events:' },
     { pattern: /^user\./, transport: 'redis', prefix: 'user-events:' },

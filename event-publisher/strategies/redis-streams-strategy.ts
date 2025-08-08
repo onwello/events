@@ -1,5 +1,6 @@
 import { BatchingStrategy, BatchMessage, BatchEnvelope, BatchingTypeStrategy } from '../batching-strategy';
 import { createHash } from 'crypto';
+import { EventPublisherInterface } from '../index';
 
 export class RedisStreamsBatchingStrategy implements BatchingStrategy {
   private typePrefix: string;
@@ -11,10 +12,18 @@ export class RedisStreamsBatchingStrategy implements BatchingStrategy {
   }
 
   canBatchTogether(message1: BatchMessage, message2: BatchMessage): boolean {
-    // Only batch messages with the same batching key
-    const key1 = this.getBatchingKey(message1.eventType);
-    const key2 = this.getBatchingKey(message2.eventType);
-    return key1 === key2;
+    if (this.batchingTypeStrategy === 'exact') {
+      return message1.eventType === message2.eventType;
+    }
+    
+    if (typeof this.batchingTypeStrategy === 'number') {
+      const key1 = this.getBatchingKey(message1.eventType);
+      const key2 = this.getBatchingKey(message2.eventType);
+      return key1 === key2;
+    }
+    
+    // Default: batch any messages together
+    return true;
   }
 
   createBatchEnvelope(messages: BatchMessage[]): BatchEnvelope {
@@ -38,8 +47,8 @@ export class RedisStreamsBatchingStrategy implements BatchingStrategy {
   async sendBatch(transport: any, batchEnvelope: BatchEnvelope): Promise<void> {
     const stream = this.getBatchStreamName();
     
-    if (typeof transport.dispatchEvent === 'function') {
-      await transport.dispatchEvent(
+    if (typeof (transport as any).dispatchEvent === 'function') {
+      await (transport as any).dispatchEvent(
         { pattern: batchEnvelope.header.type, data: batchEnvelope },
         { stream }
       );
@@ -48,20 +57,30 @@ export class RedisStreamsBatchingStrategy implements BatchingStrategy {
     }
   }
 
-  async sendIndividualMessages(basePublisher: any, messages: BatchMessage[]): Promise<void> {
+  async sendIndividualMessages(basePublisher: EventPublisherInterface, messages: BatchMessage[]): Promise<void> {
     const results = await Promise.allSettled(messages.map(async (message) => {
       try {
-        const { transport, prefix } = basePublisher['getTransportForEvent'](message.eventType);
+        const { transport, prefix } = basePublisher.getTransportForEvent(message.eventType);
+        
+        // Debug logging
+        if (!transport) {
+          console.error(`Transport is undefined for event type: ${message.eventType}`);
+          throw new Error(`No transport found for event type: ${message.eventType}`);
+        }
+        
         const finalEventType = prefix ? `${prefix}${message.eventType}` : message.eventType;
         const stream = this.getStreamForEventType(message.eventType);
         
-        if (typeof transport.dispatchEvent === 'function') {
-          await transport.dispatchEvent(
+        // Use the same approach as EventPublisher
+        if (typeof (transport as any).dispatchEvent === 'function') {
+          await (transport as any).dispatchEvent(
             { pattern: finalEventType, data: message.envelope },
             { stream }
           );
-        } else {
+        } else if (typeof transport.emit === 'function') {
           await transport.emit(finalEventType, message.envelope);
+        } else {
+          throw new Error('Transport does not support dispatchEvent or emit');
         }
       } catch (error) {
         console.error(`Failed to send individual message ${message.originalId}:`, error);

@@ -1,4 +1,4 @@
-import { EventPublisher, EventPublisherOptions } from './index';
+import { EventPublisher, EventPublisherOptions, EventPublisherInterface } from './index';
 import { EventEnvelope, createEventEnvelope, EventValidator } from '../event-types';
 import { BatchingStrategy, BatchMessage, BatchConfig, BatchEnvelope, BatchingTypeStrategy } from './batching-strategy';
 import { BatchingStrategyFactory, TransportType, StrategyFactoryOptions } from './strategies/strategy-factory';
@@ -122,7 +122,7 @@ export class BatchedEventPublisher {
   private queues: Map<string, BatchQueue> = new Map();
   private failedMessages: BatchMessage[] = [];
   private activeBatches = 0;
-  
+
   // Memory management constants
   private readonly MAX_FAILED_MESSAGES = 1000;
   private readonly MAX_QUEUES = 100;
@@ -233,7 +233,7 @@ export class BatchedEventPublisher {
     }
   }
 
-  // Public cleanup method for graceful shutdown
+  // Cleanup method for memory management
   cleanup(): void {
     // Cleanup all queues
     for (const queue of this.queues.values()) {
@@ -308,7 +308,7 @@ export class BatchedEventPublisher {
       // Retry once as individual messages using their original envelopes
       try {
         await this.strategy.sendIndividualMessages(
-          this.basePublisher,
+          this.basePublisher as EventPublisherInterface,
           messages
         );
       } catch (individualError) {
@@ -329,7 +329,7 @@ export class BatchedEventPublisher {
   private getTransportForBatch(): any {
     // Try to get transport for 'batch' event type, fallback to first available transport
     try {
-      const { transport } = this.basePublisher['getTransportForEvent']('batch');
+      const { transport } = this.basePublisher.getTransportForEvent('batch');
       return transport;
     } catch (error) {
       // If no specific route for 'batch', use the first available transport

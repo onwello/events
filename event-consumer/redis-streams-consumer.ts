@@ -49,6 +49,7 @@ export class RedisStreamConsumer {
   }
 
   async pollAndHandle() {
+    if (!this.running) return; // Stop polling if consumer is stopped
     if (this.verbose) console.log('[RedisStreamConsumer] pollAndHandle called');
     const res = await this.redis.xreadgroup(
       'GROUP', this.group, this.consumer,
@@ -95,8 +96,16 @@ export class RedisStreamConsumer {
           }
           await this.eventConsumer.handleMessage(envelope);
           if (this.verbose) console.log(`[RedisStreamConsumer] Successfully handled message for id ${id}`);
-          await this.redis.xack(this.stream, this.group, id);
-          if (this.verbose) console.log(`[RedisStreamConsumer] ACKed message for id ${id}`);
+          try {
+            await this.redis.xack(this.stream, this.group, id);
+            if (this.verbose) console.log(`[RedisStreamConsumer] ACKed message for id ${id}`);
+          } catch (ackError: unknown) {
+            if ((ackError as Error).message?.includes('Connection is closed')) {
+              if (this.verbose) console.log(`[RedisStreamConsumer] Skipping ACK for id ${id} - connection closed`);
+            } else {
+              throw ackError;
+            }
+          }
         } catch (err: unknown) {
           console.error(`[RedisStreamConsumer] Error processing message for id ${id}:`, err);
           if (this.verbose) console.error('[RedisStreamConsumer] Message fields:', JSON.stringify(fields));

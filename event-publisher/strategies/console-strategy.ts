@@ -1,5 +1,6 @@
 import { BatchingStrategy, BatchMessage, BatchEnvelope, BatchingTypeStrategy } from '../batching-strategy';
 import { createHash } from 'crypto';
+import { EventPublisherInterface } from '../index';
 
 export class ConsoleBatchingStrategy implements BatchingStrategy {
   private batchingTypeStrategy: BatchingTypeStrategy;
@@ -44,8 +45,8 @@ export class ConsoleBatchingStrategy implements BatchingStrategy {
   }
 
   async sendBatch(transport: any, batchEnvelope: BatchEnvelope): Promise<void> {
-    if (typeof transport.dispatchEvent === 'function') {
-      await transport.dispatchEvent(
+    if (typeof (transport as any).dispatchEvent === 'function') {
+      await (transport as any).dispatchEvent(
         { pattern: batchEnvelope.header.type, data: batchEnvelope },
         { stream: 'console' }
       );
@@ -54,19 +55,29 @@ export class ConsoleBatchingStrategy implements BatchingStrategy {
     }
   }
 
-  async sendIndividualMessages(basePublisher: any, messages: BatchMessage[]): Promise<void> {
+  async sendIndividualMessages(basePublisher: EventPublisherInterface, messages: BatchMessage[]): Promise<void> {
     const results = await Promise.allSettled(messages.map(async (message) => {
       try {
-        const { transport, prefix } = basePublisher['getTransportForEvent'](message.eventType);
+        const { transport, prefix } = basePublisher.getTransportForEvent(message.eventType);
+        
+        // Debug logging
+        if (!transport) {
+          console.error(`Transport is undefined for event type: ${message.eventType}`);
+          throw new Error(`No transport found for event type: ${message.eventType}`);
+        }
+        
         const finalEventType = prefix ? `${prefix}${message.eventType}` : message.eventType;
         
-        if (typeof transport.dispatchEvent === 'function') {
-          await transport.dispatchEvent(
+        // Use the same approach as EventPublisher
+        if (typeof (transport as any).dispatchEvent === 'function') {
+          await (transport as any).dispatchEvent(
             { pattern: finalEventType, data: message.envelope },
             { stream: 'console' }
           );
-        } else {
+        } else if (typeof transport.emit === 'function') {
           await transport.emit(finalEventType, message.envelope);
+        } else {
+          throw new Error('Transport does not support dispatchEvent or emit');
         }
       } catch (error) {
         console.error(`Failed to send individual message ${message.originalId}:`, error);

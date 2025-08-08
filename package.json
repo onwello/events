@@ -1,6 +1,6 @@
 {
   "name": "@logistically/events",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "A production-ready event-driven architecture library for NestJS with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

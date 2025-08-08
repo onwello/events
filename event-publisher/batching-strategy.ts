@@ -1,4 +1,5 @@
 import { EventEnvelope } from '../event-types';
+import { EventPublisherInterface } from './index';
 
 export interface BatchMessage<T = any> {
   eventType: string;
@@ -41,7 +42,7 @@ export interface BatchingStrategy {
   /**
    * Sends individual messages as fallback
    */
-  sendIndividualMessages(basePublisher: any, messages: BatchMessage[]): Promise<void>;
+  sendIndividualMessages(basePublisher: EventPublisherInterface, messages: BatchMessage[]): Promise<void>;
 
   /**
    * Gets the stream/queue name for this batch type

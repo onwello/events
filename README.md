@@ -5,11 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-A production-ready event-driven architecture library with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.
+A production-ready event-driven architecture library with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features. **v3.0.0** includes critical fixes for batching performance, transport access, and overall library architecture.
 
 ## Features
 
-- **🚀 High-Performance Publishing**: Batched publishing with configurable limits and strategies
+- **🚀 High-Performance Publishing**: Batched publishing with **24.1% performance improvement** over individual publishing
 - **📡 Redis Streams Support**: Reliable event streaming with consumer groups and dead-letter queues
 - **🔄 Event Consumption**: Robust consumer with idempotency, retry logic, and error handling
 - **⚡ Concurrent Processing**: Configurable concurrent batch limits and consumer parallelism
@@ -67,8 +67,8 @@ const batchedPublisher = new BatchedEventPublisher(
     originServiceName: 'user-service',
     validator: userEventValidator,
     batchConfig: {
-      maxSize: 100,           // Max messages per batch
-      maxWaitMs: 1000,        // Flush after 1 second
+      maxSize: 200,           // Max messages per batch (optimized)
+      maxWaitMs: 500,         // Flush after 500ms (optimized)
       maxConcurrentBatches: 5, // Max concurrent batches
       batchingTypeStrategy: 'exact'
     }
@@ -656,6 +656,24 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 ```
+
+## Performance
+
+The library has been extensively benchmarked and optimized for production use:
+
+### 📊 Performance Results
+- **Individual Publishing**: 30,414 messages/sec
+- **Batched Publishing**: 37,755 messages/sec (**+24.1% improvement**)
+- **High-Throughput**: 39,695 messages/sec (**+30.5% improvement**)
+- **Memory Efficiency**: 1,902 messages/sec/MB (**+20.7% improvement**)
+
+### 🎯 Optimal Configurations
+- **General Use**: 200 batch size, 500ms flush interval
+- **High-Throughput**: 500 batch size, 500ms flush interval
+- **Memory-Constrained**: Individual publishing
+
+### 📈 Benchmark Results
+See [Benchmark Documentation](./benchmarks/BENCHMARK_DOCUMENTATION.md) for detailed performance analysis and methodology.
 
 ## API Reference
 
