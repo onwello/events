@@ -167,33 +167,32 @@ node --max-old-space-size=4096 comprehensive-benchmark.js
 - **Concurrency Overhead**: Poor performance with multiple publishers
 - **Optimal Configurations**: 200 for general use, 1000 for high-throughput
 
-## 🔄 Continuous Benchmarking
+## 🔄 Running Benchmarks
 
-### Automated Testing
+### Manual Execution
 ```bash
-# Run benchmarks on code changes
-npm run benchmark
+# Run comprehensive benchmarks
+node comprehensive-benchmark.js
 
-# Performance regression testing
-npm run benchmark:regression
+# For memory-intensive tests, increase heap size
+node --max-old-space-size=4096 comprehensive-benchmark.js
 ```
 
 ### Historical Tracking
-- Results are logged to `benchmark-results.json`
+- Results are documented in `BENCHMARK_RESULTS.md`
 - Performance trends tracked over time
-- Regression alerts on performance degradation
+- Compare results across different runs
 
 ## 📚 Additional Resources
 
 - **Detailed Documentation**: See `BENCHMARK_DOCUMENTATION.md`
-- **Quick Reference**: See `BENCHMARK_SUMMARY.md`
 - **Library Documentation**: See main README.md
 - **API Reference**: See docs/API.md
 
 ## 🤝 Contributing
 
 ### Adding New Benchmarks
-1. Create new benchmark file in `src/`
+1. Create new benchmark file following the pattern of `comprehensive-benchmark.js`
 2. Follow existing patterns for consistency
 3. Add documentation in `BENCHMARK_DOCUMENTATION.md`
 4. Update this README with new benchmark details
