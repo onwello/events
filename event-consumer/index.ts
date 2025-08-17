@@ -1,2 +1,2 @@
-export * from './redis-streams-consumer';
-export * from './consumer'; 
+export { EventConsumer, createConsumer } from './consumer';
+export type { ConsumerConfig, ConsumerStats } from './consumer'; 

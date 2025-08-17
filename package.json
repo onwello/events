@@ -1,14 +1,17 @@
 {
   "name": "@logistically/events",
   "version": "3.0.0",
-  "description": "A production-ready event-driven architecture library for NestJS with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.",
+  "description": "A production-ready event-driven architecture library with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:unit": "jest --testPathIgnorePatterns=integration-tests.spec.ts",
+    "example:origin-based": "ts-node examples/basic/origin-based-system.ts"
   },
   "repository": {
     "type": "git",
@@ -20,7 +23,6 @@
     "redis",
     "streams",
     "typescript",
-    "microservices",
     "event-driven",
     "batching",
     "validation",
@@ -35,19 +37,18 @@
   "files": [
     "dist"
   ],
-  "peerDependencies": {
-    "@nestjs/microservices": "^10.0.0"
-  },
   "devDependencies": {
-    "@nestjs/microservices": "^10.0.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.0.14",
+    "chalk": "^4.1.2",
+    "ioredis": "^5.6.1",
     "jest": "^30.0.4",
     "ts-jest": "^29.4.0",
     "typescript": "^5.8.3"
   },
   "dependencies": {
     "ioredis": "^5.6.1",
+    "rxjs": "^7.8.2",
     "uuid": "^11.1.0",
     "zod": "^4.0.5"
   },

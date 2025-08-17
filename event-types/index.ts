@@ -6,7 +6,8 @@ import { createHash, randomUUID } from 'crypto';
 export interface EventHeader {
   id: string;
   type: string;
-  origin: string;
+  origin: string;  // Service name (e.g., 'user-service')
+  originPrefix?: string;  // Regional/organizational prefix (e.g., 'eu.de', 'us.ca')
   timestamp: string;
   hash: string; // SHA-256 hash of the body for idempotency
   version: string; // Schema version for future compatibility
@@ -31,12 +32,14 @@ export function generateEventHash(body: any): string {
 export function createEventHeader(
   eventType: string, 
   origin: string, 
-  body: any
+  body: any,
+  originPrefix?: string
 ): EventHeader {
   return {
     id: generateEventId(),
     type: eventType,
     origin,
+    originPrefix,  // Always present, even when undefined
     timestamp: new Date().toISOString(),
     hash: generateEventHash(body),
     version: '1.0.0', // TODO: Make this configurable
@@ -47,13 +50,12 @@ export function createEventEnvelope<T>(
   eventType: string,
   origin: string,
   body: T,
-  namespace?: string
+  originPrefix?: string
 ): EventEnvelope<T> {
-  // Apply namespace as prefix for ownership, not restriction
-  const finalEventType = namespace ? `${namespace}.${eventType}` : eventType;
-  
+  // originPrefix is optional and represents regional/organizational context
+  // For traceability, we have the origin (service name) in the header
   return {
-    header: createEventHeader(finalEventType, origin, body),
+    header: createEventHeader(eventType, origin, body, originPrefix),
     body,
   };
 }
@@ -62,7 +64,7 @@ export function createEventEnvelope<T>(
 
 export interface EventValidator {
   validate(eventType: string, body: any): ValidationResult;
-  getSchema(eventType: string): z.ZodSchema;
+  getSchema(eventType: string): z.ZodSchema | undefined;
 }
 
 export interface ValidationResult {
@@ -81,21 +83,35 @@ export class DefaultEventValidator implements EventValidator {
     this.schemas[eventType] = schema;
   }
 
-  getSchema(eventType: string): z.ZodSchema {
-    const schema = this.schemas[eventType];
-    if (!schema) {
-      throw new Error(`No schema registered for event type: ${eventType}`);
-    }
-    return schema;
+  getSchema(eventType: string): z.ZodSchema | undefined {
+    return this.schemas[eventType];
   }
 
   validate(eventType: string, body: any): ValidationResult {
     try {
       const schema = this.getSchema(eventType);
+      if (!schema) {
+        // If no schema is registered, allow the event to pass validation
+        // This is useful for testing and when strict validation is not required
+        return { valid: true };
+      }
       schema.parse(body);
       return { valid: true };
     } catch (error) {
       return { valid: false, error: (error as Error).message };
     }
   }
+}
+
+// Helper function to get the full event type (with origin prefix if present)
+export function getFullEventType(envelope: EventEnvelope): string {
+  if (envelope.header.originPrefix) {
+    return `${envelope.header.originPrefix}.${envelope.header.type}`;
+  }
+  return envelope.header.type;
+}
+
+// Factory function to create an event validator
+export function createEventValidator(schemas?: Record<string, z.ZodSchema>): EventValidator {
+  return new DefaultEventValidator(schemas);
 } 

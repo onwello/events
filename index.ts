@@ -4,27 +4,58 @@
  * Licensed under the MIT License
  */
 
-// Core event types and validation
-export * from './event-types';
+// Core exports
+export { EventPublisher, createPublisher } from './event-publisher/publisher';
+export { EventConsumer, createConsumer } from './event-consumer/consumer';
+export { TransportFactory, createTransportFactory } from './event-transport/factory';
+export { EventSystemBuilder, createEventSystemBuilder, createEventSystem } from './event-system-builder';
 
-// Event publishing
-export * from './event-publisher';
+// Plugin exports
+export { RedisStreamsPlugin, MemoryTransportPlugin } from './plugins';
+export type { TransportPlugin, PluginRegistry, PluginStructure } from './event-transport/plugin.interface';
 
-// Event consuming
-export * from './event-consumer';
+// Configuration exports - now consolidated
+export type { 
+  PublisherConfig, 
+  ConsumerConfig, 
+  EventSystemConfig 
+} from './event-system-builder';
 
-// Event routing
-export * from './event-routing';
+export type { TransportFactoryConfig } from './event-transport/factory';
 
-// Event transport
-export * from './event-transport';
+export type { 
+  Transport, 
+  TransportCapabilities, 
+  EventEnvelope, 
+  MessageHandler, 
+  PatternHandler 
+} from './event-transport/transport.interface';
 
-// Batching infrastructure
-export * from './event-publisher/batching-strategy';
-export * from './event-publisher/strategies/strategy-factory';
-export * from './event-publisher/strategies/redis-streams-strategy';
-export * from './event-publisher/strategies/console-strategy';
-export * from './event-publisher/batched-publisher';
+export type { 
+  EventRouter, 
+  RoutingConfig, 
+  EventRoute 
+} from './event-routing';
 
-// Batched consuming
-export * from './event-consumer/batched-consumer'; 
+export type { 
+  EventValidator, 
+  ValidationResult 
+} from './event-types';
+
+// Transport configs are now plugin-specific
+// Use plugin.getDefaultConfig() or plugin-specific config interfaces
+
+// Event types
+export { 
+  createEventEnvelope, 
+  createEventValidator, 
+  DefaultEventValidator 
+} from './event-types';
+
+// Routing
+export { 
+  createEventRouter, 
+  createBasicRoutingConfig 
+} from './event-routing';
+
+ 

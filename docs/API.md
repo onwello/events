@@ -1,555 +1,808 @@
-# API Documentation
+# API Reference
 
-## Table of Contents
+## Overview
 
-- [EventPublisher](#eventpublisher)
-- [BatchedEventPublisher](#batchedeventpublisher)
-- [RedisStreamsServer](#redisstreamsserver)
-- [EventValidator](#eventvalidator)
-- [BatchConfig](#batchconfig)
-- [Consumer Configuration](#consumer-configuration)
-- [Transport Types](#transport-types)
-- [Batching Strategies](#batching-strategies)
-- [Error Handling](#error-handling)
+This document provides a comprehensive reference for all public APIs in the `@logistically/events` library. The library provides a production-ready event-driven architecture with support for multiple transport backends, advanced routing, and enterprise features.
 
-## EventPublisher
+## Quick Start
 
-The main event publishing class that handles single event publishing with routing and validation.
+```typescript
+import { createEventSystemBuilder, RedisStreamsPlugin, MemoryTransportPlugin } from '@logistically/events';
+
+// Create an event system with Redis transport
+const eventSystem = createEventSystemBuilder()
+  .service('user-service')
+  .addTransportFromFactory('redis', 'redis-streams', {
+    url: 'redis://localhost:6379',
+    consumerGroup: 'user-service-group',
+    batchSize: 100
+  })
+  .enablePublisherBatching({
+    enabled: true,
+    maxSize: 1000,
+    maxWaitMs: 100,
+    maxConcurrentBatches: 5,
+    strategy: 'size'
+  })
+  .enableConsumerPatternRouting()
+  .build();
+
+// Connect and start using
+await eventSystem.connect();
+
+// Publish events
+await eventSystem.publisher.publish('user.created', { userId: '123', email: 'user@example.com' });
+
+// Subscribe to events
+await eventSystem.consumer.subscribe('user.created', async (message, metadata) => {
+  console.log('User created:', message.body);
+});
+
+// Subscribe to patterns
+await eventSystem.consumer.subscribePattern('user.*', async (message, metadata, pattern) => {
+  console.log('User event:', message.body, 'Pattern:', pattern);
+});
+```
+
+## Core Exports
+
+### Event System Builder
+
+```typescript
+import { createEventSystemBuilder, createEventSystem } from '@logistically/events';
+```
+
+**Factory Functions:**
+- `createEventSystemBuilder()`: Creates a new EventSystemBuilder instance with fluent API
+- `createEventSystem(config)`: Creates an EventSystem directly from configuration
+
+### Event Router
+
+```typescript
+import { createEventRouter, createBasicRoutingConfig, defaultRoutingConfig } from '@logistically/events';
+```
+
+**Factory Functions:**
+- `createEventRouter(config, transportCapabilities)`: Creates a new EventRouter instance
+- `createBasicRoutingConfig(...)`: Creates a basic routing configuration
+- `defaultRoutingConfig`: Default routing configuration object
+
+### Core Types
+
+```typescript
+import { 
+  EventSystemConfig, 
+  EventRoute, 
+  RoutingConfig,
+  Transport,
+  TransportCapabilities,
+  EventEnvelope,
+  MessageHandler,
+  PatternHandler
+} from '@logistically/events';
+```
+
+### Plugin Exports
+
+```typescript
+import { RedisStreamsPlugin, MemoryTransportPlugin } from '@logistically/events';
+```
+
+## EventSystemBuilder API
 
 ### Constructor
 
 ```typescript
-new EventPublisher(
-  transports: Record<string, any>,
-  options: EventPublisherOptions
-)
-```
-
-**Parameters:**
-- `transports`: Object containing transport instances (e.g., `{ redis: redisClient }`)
-- `options`: Configuration options for the publisher
-
-### Methods
-
-#### `publish<T>(eventType: string, body: T): Promise<void>`
-
-Publishes a single event to the appropriate transport based on routing configuration.
-
-**Parameters:**
-- `eventType`: The type of event (e.g., 'user.created')
-- `body`: The event payload
-
-**Example:**
-```typescript
-await publisher.publish('user.created', { 
-  userId: '123', 
-  name: 'John Doe',
-  email: 'john@example.com' 
-});
-```
-
-#### `publishBatch<T>(eventType: string, bodies: T[]): Promise<void>`
-
-Publishes multiple events of the same type immediately.
-
-**Parameters:**
-- `eventType`: The type of event
-- `bodies`: Array of event payloads
-
-**Example:**
-```typescript
-await publisher.publishBatch('user.created', [
-  { userId: '1', name: 'John', email: 'john@example.com' },
-  { userId: '2', name: 'Jane', email: 'jane@example.com' }
-]);
-```
-
-### Properties
-
-#### `validator: EventValidator`
-
-The validator instance used for event validation.
-
-## BatchedEventPublisher
-
-A specialized publisher that batches events for efficient processing with configurable limits and error handling.
-
-### Constructor
-
-```typescript
-new BatchedEventPublisher(
-  transports: Record<string, any>,
-  options: BatchedEventPublisherOptions
-)
-```
-
-**Parameters:**
-- `transports`: Object containing transport instances
-- `options`: Configuration options including batch settings
-
-### Methods
-
-#### `addMessage<T>(eventType: string, body: T): Promise<void>`
-
-Adds a message to the appropriate batch queue. The message will be sent when the batch is flushed.
-
-**Parameters:**
-- `eventType`: The type of event
-- `body`: The event payload
-
-**Example:**
-```typescript
-await batchedPublisher.addMessage('user.created', { 
-  userId: '123', 
-  name: 'John Doe',
-  email: 'john@example.com' 
-});
-```
-
-#### `flush(): Promise<void>`
-
-Forces all pending batches to be sent immediately.
-
-**Example:**
-```typescript
-await batchedPublisher.addMessage('user.created', { userId: '123' });
-await batchedPublisher.flush(); // Sends the batch immediately
-```
-
-#### `publishBatch<T>(eventType: string, bodies: T[]): Promise<void>`
-
-Publishes multiple events immediately without batching.
-
-**Parameters:**
-- `eventType`: The type of event
-- `bodies`: Array of event payloads
-
-**Example:**
-```typescript
-await batchedPublisher.publishBatch('user.created', [
-  { userId: '1', name: 'John' },
-  { userId: '2', name: 'Jane' }
-]);
-```
-
-#### `getFailedMessages(): BatchMessage[]`
-
-Returns an array of messages that failed to be sent.
-
-**Returns:** Array of failed messages with their original data
-
-**Example:**
-```typescript
-const failedMessages = batchedPublisher.getFailedMessages();
-if (failedMessages.length > 0) {
-  console.log('Failed messages:', failedMessages);
+class EventSystemBuilder {
+  constructor();
 }
 ```
 
-#### `clearFailedMessages(): void`
+### Configuration Methods
 
-Clears the list of failed messages.
+#### `service(name: string): EventSystemBuilder`
 
-**Example:**
+Sets the service name for the event system.
+
 ```typescript
-batchedPublisher.clearFailedMessages();
+const builder = createEventSystemBuilder()
+  .service('user-service');
 ```
+
+**Parameters:**
+- `name`: Required service name (string)
+
+**Returns:** EventSystemBuilder instance for chaining
+
+**Throws:** Error if service name is empty or whitespace
+
+#### `addTransport(name: string, transport: Transport): EventSystemBuilder`
+
+Adds a transport instance to the system.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .addTransport('redis', redisTransport)
+  .addTransport('memory', memoryTransport);
+```
+
+**Parameters:**
+- `name`: Transport identifier (string)
+- `transport`: Transport instance implementing Transport interface
+
+**Returns:** EventSystemBuilder instance for chaining
+
+**Throws:** Error if transport name is empty or duplicate
+
+#### `addTransportFromFactory(name: string, type: string, config: any): EventSystemBuilder`
+
+Creates and adds a transport using the transport factory.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .addTransportFromFactory('redis', 'redis-streams', {
+    url: 'redis://localhost:6379',
+    consumerGroup: 'my-group',
+    batchSize: 100
+  });
+```
+
+**Parameters:**
+- `name`: Transport identifier (string)
+- `type`: Transport type (e.g., 'redis-streams', 'memory')
+- `config`: Transport-specific configuration
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `originPrefix(prefix: string): EventSystemBuilder`
+
+Sets the origin prefix for regional isolation.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .originPrefix('eu.de');
+```
+
+**Parameters:**
+- `prefix`: Origin prefix (e.g., 'eu.de', 'us.ca')
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `origins(origins: string[]): EventSystemBuilder`
+
+Sets allowed origin prefixes for filtering.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .origins(['eu.de', 'us.ca']);
+```
+
+**Parameters:**
+- `origins`: Array of allowed origin prefixes
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `routing(config: RoutingConfig): EventSystemBuilder`
+
+Sets the routing configuration.
+
+```typescript
+const routingConfig = createBasicRoutingConfig(
+  [{ pattern: 'user.*', transport: 'redis' }],
+  'warn',
+  'eu.de'
+);
+
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .routing(routingConfig);
+```
+
+**Parameters:**
+- `config`: Routing configuration object
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `enablePublisherBatching(config: BatchingConfig): EventSystemBuilder`
+
+Configures publisher batching behavior.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .enablePublisherBatching({
+    enabled: true,
+    maxSize: 1000,
+    maxWaitMs: 100,
+    maxConcurrentBatches: 5,
+    strategy: 'size'
+  });
+```
+
+**Parameters:**
+- `config`: Batching configuration object
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `enablePublisherRetry(config: RetryConfig): EventSystemBuilder`
+
+Configures publisher retry behavior.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .enablePublisherRetry({
+    maxRetries: 3,
+    backoffStrategy: 'exponential',
+    baseDelay: 1000,
+    maxDelay: 10000
+  });
+```
+
+**Parameters:**
+- `config`: Retry configuration object
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `enablePublisherRateLimiting(config: RateLimitingConfig): EventSystemBuilder`
+
+Configures publisher rate limiting.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .enablePublisherRateLimiting({
+    maxRequests: 1000,
+    timeWindow: 60000,
+    strategy: 'sliding-window'
+  });
+```
+
+**Parameters:**
+- `config`: Rate limiting configuration object
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `enableConsumerPatternRouting(): EventSystemBuilder`
+
+Enables consumer pattern routing.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .enableConsumerPatternRouting();
+```
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `enableConsumerGroups(): EventSystemBuilder`
+
+Enables consumer groups.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .enableConsumerGroups();
+```
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `setPoisonMessageHandler(handler: PoisonMessageHandler): EventSystemBuilder`
+
+Sets the poison message handler for failed message processing.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .setPoisonMessageHandler(async (message, error, metadata) => {
+    console.error('Poison message:', message, error);
+    await logToMonitoringSystem(message, error);
+  });
+```
+
+**Parameters:**
+- `handler`: Function to handle poison messages
+
+**Returns:** EventSystemBuilder instance for chaining
+
+#### `setValidationMode(mode: 'strict' | 'warn' | 'ignore'): EventSystemBuilder`
+
+Sets the validation mode for the system.
+
+```typescript
+const builder = createEventSystemBuilder()
+  .service('my-service')
+  .setValidationMode('strict');
+```
+
+**Parameters:**
+- `mode`: Validation mode ('strict', 'warn', or 'ignore')
+
+**Returns:** EventSystemBuilder instance for chaining
+
+### Building Methods
+
+#### `build(): EventSystem`
+
+Builds and returns the configured EventSystem instance.
+
+```typescript
+const eventSystem = createEventSystemBuilder()
+  .service('my-service')
+  .addTransportFromFactory('redis', 'redis-streams', {
+    url: 'redis://localhost:6379'
+  })
+  .build();
+```
+
+**Returns:** Configured EventSystem instance
+
+**Throws:** Error if configuration is invalid or incomplete
+
+## EventSystem API
 
 ### Properties
 
-#### `validator: EventValidator`
-
-The validator instance used for event validation.
-
-## RedisStreamsServer
-
-A robust Redis Streams consumer with support for consumer groups, dead-letter queues, and idempotent processing.
-
-### Constructor
-
 ```typescript
-new RedisStreamsServer(config: RedisStreamsServerConfig)
+interface EventSystem {
+  readonly publisher: EventPublisher;
+  readonly consumer: EventConsumer;
+  readonly router: EventRouter;
+  readonly validator: EventValidator;
+  readonly transports: Map<string, Transport>;
+}
 ```
-
-**Parameters:**
-- `config`: Configuration for the Redis Streams consumer
 
 ### Methods
 
-#### `addHandler(eventType: string, handler: EventHandler): void`
+#### `connect(): Promise<void>`
 
-Registers an event handler for a specific event type.
+Connects to all configured transports.
 
-**Parameters:**
-- `eventType`: The type of event to handle
-- `handler`: The handler function
-
-**Example:**
 ```typescript
-consumer.addHandler('user.created', async (body, header) => {
-  console.log('Processing user creation:', body);
-  console.log('Event ID:', header.id);
-  console.log('Event hash:', header.hash); // For idempotency
-  
-  // Your business logic here
-  await createUser(body);
-});
+await eventSystem.connect();
 ```
 
-#### `listen(): Promise<void>`
+**Returns:** Promise that resolves when all transports are connected
 
-Starts consuming events from the Redis stream.
-
-**Example:**
-```typescript
-await consumer.listen();
-console.log('Consumer started');
-```
+**Throws:** Error if any transport fails to connect
 
 #### `close(): Promise<void>`
 
-Gracefully shuts down the consumer.
+Closes all transport connections.
 
-**Example:**
 ```typescript
-await consumer.close();
-console.log('Consumer stopped');
+await eventSystem.close();
 ```
 
-#### `getStatus(): Promise<ConsumerStatus>`
+**Returns:** Promise that resolves when all transports are closed
 
-Returns the current status of the consumer.
+#### `isConnected(): boolean`
 
-**Returns:** Consumer status including pending messages, lag, etc.
-
-**Example:**
-```typescript
-const status = await consumer.getStatus();
-console.log('Pending messages:', status.pendingMessages);
-console.log('Consumer lag:', status.lag);
-```
-
-### Event Handler Signature
+Checks if the system is connected to all transports.
 
 ```typescript
-type EventHandler = (body: any, header: EventHeader) => Promise<void>;
-
-interface EventHeader {
-  id: string;           // Unique event identifier
-  type: string;         // Event type
-  origin: string;       // Source service name
-  timestamp: string;    // ISO timestamp
-  hash: string;         // SHA-256 hash for idempotency
-  version: string;      // Schema version
+if (eventSystem.isConnected()) {
+  console.log('All transports connected');
 }
 ```
 
-## EventValidator
+**Returns:** True if all transports are connected
 
-Interface for event validation. Implement this interface to provide custom validation logic.
+#### `getStatus(): Promise<EventSystemStatus>`
 
-### Interface
+Gets the current system status.
 
 ```typescript
-interface EventValidator {
-  validate(eventType: string, body: any): ValidationResult;
-  getSchema(eventType: string): any;
-}
+const status = await eventSystem.getStatus();
+console.log('System status:', status);
 ```
+
+**Returns:** Promise that resolves to EventSystemStatus object with connection and health information
+
+## EventPublisher API
 
 ### Methods
 
-#### `validate(eventType: string, body: any): ValidationResult`
+#### `publish(eventType: string, data: any, options?: PublishOptions): Promise<void>`
 
-Validates an event body against the schema for the given event type.
+Publishes a single event.
+
+```typescript
+await eventSystem.publisher.publish('user.created', { userId: '123' });
+
+// With options
+await eventSystem.publisher.publish('order.completed', 
+  { orderId: '456', total: 99.99 },
+  { partition: 1, headers: { priority: 'high' } }
+);
+```
 
 **Parameters:**
-- `eventType`: The type of event to validate
-- `body`: The event payload to validate
+- `eventType`: Type of event to publish
+- `data`: Event data payload
+- `options`: Optional publishing options
 
-**Returns:** `ValidationResult` object with validation status and error details
+**Returns:** Promise that resolves when event is published
 
-**Example:**
+**Throws:** Error if publishing fails or validation fails
+
+#### `publishBatch(events: Array<{ eventType: string; body: any }>): Promise<void>`
+
+Publishes multiple events in a batch.
+
 ```typescript
-const validator: EventValidator = {
-  validate: (eventType: string, body: any) => {
-    if (eventType === 'user.created') {
-      if (!body.userId) {
-        return { valid: false, error: 'userId is required' };
-      }
-      if (!body.email) {
-        return { valid: false, error: 'email is required' };
-      }
-    }
-    return { valid: true };
-  },
-  getSchema: (eventType: string) => {
-    // Return schema for the event type
-    return schemas[eventType];
-  }
-};
+const events = [
+  { eventType: 'user.created', body: { userId: '123' } },
+  { eventType: 'user.created', body: { userId: '456' } }
+];
+
+await eventSystem.publisher.publishBatch(events);
 ```
-
-#### `getSchema(eventType: string): any`
-
-Returns the schema for the given event type.
 
 **Parameters:**
-- `eventType`: The type of event
+- `events`: Array of events to publish
 
-**Returns:** Schema object for the event type
+**Returns:** Promise that resolves when all events are published
 
-## BatchConfig
+**Throws:** Error if batch publishing fails
 
-Configuration for batch processing behavior.
+#### `getStats(): Promise<PublisherStats>`
 
-### Interface
+Gets publisher statistics.
 
 ```typescript
-interface BatchConfig {
-  maxSize: number;                     // Maximum messages per batch
-  maxWaitMs: number;                   // Maximum wait time before flushing
-  maxConcurrentBatches: number;        // Maximum concurrent batches
-  batchingTypeStrategy: BatchingTypeStrategy;
-}
+const stats = await eventSystem.publisher.getStats();
+console.log('Total published:', stats.totalMessagesSent);
+console.log('Failed publishes:', stats.failedMessages);
+console.log('Batch count:', stats.totalBatchesSent);
 ```
 
-### Properties
+**Returns:** Promise that resolves to PublisherStats object with performance metrics
 
-- `maxSize`: Maximum number of messages that can be in a single batch
-- `maxWaitMs`: Maximum time to wait before automatically flushing a batch
-- `maxConcurrentBatches`: Maximum number of batches that can be processed simultaneously
-- `batchingTypeStrategy`: Strategy for determining how events are batched together
+## EventConsumer API
 
-### Example
+### Methods
 
-```typescript
-const batchConfig: BatchConfig = {
-  maxSize: 100,           // Max 100 messages per batch
-  maxWaitMs: 1000,        // Flush after 1 second
-  maxConcurrentBatches: 5, // Max 5 concurrent batches
-  batchingTypeStrategy: 'exact'
-};
-```
+#### `subscribe(eventType: string, handler: MessageHandler, options?: SubscribeOptions): Promise<void>`
 
-## Consumer Configuration
-
-### RedisStreamsServerConfig
+Subscribes to events of a specific type.
 
 ```typescript
-interface RedisStreamsServerConfig {
-  host: string;
-  port: number;
-  password?: string;
-  stream: string;                      // Redis stream name
-  group: string;                       // Consumer group name
-  consumer: string;                    // Consumer instance name
-  blockMs?: number;                    // Block timeout (default: 1000)
-  batchSize?: number;                  // Messages per batch (default: 10)
-  retryAttempts?: number;              // Retry attempts (default: 3)
-  deadLetterStream?: string;           // Dead letter stream
-  maxPendingMessages?: number;         // Max pending messages
-  autoAck?: boolean;                   // Auto acknowledge (default: true)
-  retryDelayMs?: number;               // Delay between retries (default: 1000)
-  maxRetryDelayMs?: number;            // Max retry delay (default: 30000)
-}
-```
+await eventSystem.consumer.subscribe('user.created', async (message, metadata) => {
+  console.log('User created:', message.body);
+});
 
-### Consumer Status
-
-```typescript
-interface ConsumerStatus {
-  isConnected: boolean;
-  pendingMessages: number;
-  lag: number;                         // Messages behind
-  lastProcessedId?: string;
-  errorCount: number;
-  retryCount: number;
-}
-```
-
-## Transport Types
-
-### Redis Streams Transport
-
-```typescript
-import { createRedisStreamsClient } from '@logistically/events';
-
-const redisClient = createRedisStreamsClient({
-  host: 'localhost',
-  port: 6379,
-  password: 'your-password',
-  retryDelayOnFailover: 100,
-  maxRetriesPerRequest: 3,
-  connectTimeout: 10000,
-  commandTimeout: 5000
+// With options
+await eventSystem.consumer.subscribe('order.*', async (message, metadata) => {
+  console.log('Order event:', message.body);
+}, {
+  groupId: 'order-processors',
+  partition: 1
 });
 ```
 
-### Console Transport (Development Only)
+**Parameters:**
+- `eventType`: Event type to subscribe to
+- `handler`: Function to handle received messages
+- `options`: Optional subscription options
+
+**Returns:** Promise that resolves when subscription is created
+
+**Throws:** Error if subscription fails
+
+#### `subscribePattern(pattern: string, handler: PatternHandler, options?: SubscribeOptions): Promise<void>`
+
+Subscribes to events matching a pattern.
 
 ```typescript
-import { ConsoleClientProxy } from '@logistically/events';
-
-const consoleTransport = new ConsoleClientProxy();
-```
-
-## Batching Strategies
-
-### Exact Strategy
-
-Batches events with exactly the same event type.
-
-```typescript
-const config: BatchConfig = {
-  batchingTypeStrategy: 'exact'
-};
-
-// Only 'user.created' events will be batched together
-await publisher.addMessage('user.created', { userId: '1' });
-await publisher.addMessage('user.created', { userId: '2' });
-// These will be in the same batch
-```
-
-### Position-Based Strategy
-
-Batches events based on a specific position in the event type.
-
-```typescript
-const config: BatchConfig = {
-  batchingTypeStrategy: '0' // Batch by first token
-};
-
-// 'user.created' and 'user.updated' will be batched together
-await publisher.addMessage('user.created', { userId: '1' });
-await publisher.addMessage('user.updated', { userId: '2' });
-// These will be in the same batch because they share 'user' at position 0
-```
-
-## Error Handling
-
-### Failed Message Structure
-
-```typescript
-interface BatchMessage {
-  eventType: string;
-  body: any;
-  originalId: string;
-  timestamp: string;
-  envelope: EventEnvelope;
-}
-```
-
-### Error Handling Example
-
-```typescript
-// Add messages
-await batchedPublisher.addMessage('user.created', { userId: '1' });
-await batchedPublisher.addMessage('user.created', { userId: '2' });
-
-// Flush and check for errors
-await batchedPublisher.flush();
-
-const failedMessages = batchedPublisher.getFailedMessages();
-if (failedMessages.length > 0) {
-  console.error('Failed messages:', failedMessages);
-  
-  // Retry failed messages
-  for (const message of failedMessages) {
-    try {
-      await batchedPublisher.addMessage(message.eventType, message.body);
-    } catch (error) {
-      console.error('Retry failed:', error);
-    }
-  }
-  
-  // Clear the failed messages list
-  batchedPublisher.clearFailedMessages();
-}
-```
-
-### Consumer Error Handling
-
-```typescript
-consumer.addHandler('user.created', async (body, header) => {
-  try {
-    // Use event hash for idempotency
-    const processed = await checkIfProcessed(header.hash);
-    if (processed) {
-      console.log('Event already processed, skipping');
-      return;
-    }
-    
-    // Process the event
-    await createUser(body);
-    
-    // Mark as processed
-    await markAsProcessed(header.hash);
-  } catch (error) {
-    console.error('Failed to process user creation:', error);
-    
-    // Re-throw for retry (will go to dead letter after max retries)
-    throw error;
-  }
+await eventSystem.consumer.subscribePattern('user.*', async (message, metadata, pattern) => {
+  console.log('User event:', message.body, 'Pattern:', pattern);
 });
 ```
 
-### Concurrent Batch Limit Errors
+**Parameters:**
+- `pattern`: Pattern to match events against
+- `handler`: Function to handle matched messages
+- `options`: Optional subscription options
 
-When the concurrent batch limit is exceeded, the publisher will throw an error:
+**Returns:** Promise that resolves when pattern subscription is created
+
+**Throws:** Error if subscription fails or pattern routing is disabled
+
+#### `unsubscribe(eventType: string): Promise<void>`
+
+Unsubscribes from events of a specific type.
+
+```typescript
+await eventSystem.consumer.unsubscribe('user.created');
+```
+
+**Parameters:**
+- `eventType`: Event type to unsubscribe from
+
+**Returns:** Promise that resolves when unsubscription is complete
+
+#### `unsubscribePattern(pattern: string): Promise<void>`
+
+Unsubscribes from a pattern subscription.
+
+```typescript
+await eventSystem.consumer.unsubscribePattern('user.*');
+```
+
+**Parameters:**
+- `pattern`: Pattern to unsubscribe from
+
+**Returns:** Promise that resolves when unsubscription is complete
+
+#### `getSubscriptions(): SubscriptionInfo[]`
+
+Gets information about all active subscriptions.
+
+```typescript
+const subscriptions = eventSystem.consumer.getSubscriptions();
+subscriptions.forEach(sub => {
+  console.log('Subscription:', sub.eventType, 'Messages:', sub.messageCount);
+});
+```
+
+**Returns:** Array of subscription information objects
+
+#### `getStats(): Promise<ConsumerStats>`
+
+Gets consumer statistics.
+
+```typescript
+const stats = await eventSystem.consumer.getStats();
+console.log('Total messages:', stats.totalMessagesReceived);
+console.log('Failed messages:', stats.failedMessages);
+console.log('Poison messages:', stats.poisonMessages);
+console.log('Average processing time:', stats.averageProcessingTime);
+```
+
+**Returns:** Promise that resolves to ConsumerStats object with processing metrics
+
+## EventRouter API
+
+### Methods
+
+#### `matchesPattern(eventType: string, pattern: string): boolean`
+
+Checks if an event type matches a pattern.
+
+```typescript
+const matches = router.matchesPattern('user.created', 'user.*');
+console.log('Matches:', matches); // true
+
+const matchesExact = router.matchesPattern('user.created', 'user.created');
+console.log('Exact match:', matchesExact); // true
+```
+
+**Parameters:**
+- `eventType`: Event type to check
+- `pattern`: Pattern to match against
+
+**Returns:** True if event type matches pattern
+
+#### `resolveTopic(eventType: string): string`
+
+Resolves the topic for an event type.
+
+```typescript
+const topic = router.resolveTopic('user.created');
+console.log('Topic:', topic); // 'user-events'
+```
+
+**Parameters:**
+- `eventType`: Event type to resolve topic for
+
+**Returns:** Resolved topic name
+
+#### `validateEventType(eventType: string): boolean`
+
+Validates an event type format.
+
+```typescript
+const isValid = router.validateEventType('user.created');
+console.log('Valid:', isValid); // true
+
+const isInvalid = router.validateEventType('user-created');
+console.log('Valid:', isInvalid); // false
+```
+
+**Parameters:**
+- `eventType`: Event type to validate
+
+**Returns:** True if event type format is valid
+
+#### `validateAndNormalizePattern(pattern: string): string`
+
+Validates and normalizes a pattern string.
 
 ```typescript
 try {
-  await batchedPublisher.addMessage('user.created', { userId: '1' });
+  const normalized = router.validateAndNormalizePattern('USER.*');
+  console.log('Normalized:', normalized); // 'user.*'
 } catch (error) {
-  if (error.message === 'Too many concurrent batches') {
-    // Handle the error - wait and retry, or reduce batch limits
-    console.error('Concurrent batch limit exceeded');
-    await batchedPublisher.flush(); // Wait for current batches
-    await batchedPublisher.addMessage('user.created', { userId: '1' });
-  }
+  console.error('Invalid pattern:', error.message);
 }
 ```
 
-## Event Envelope Structure
+**Parameters:**
+- `pattern`: Pattern to validate and normalize
 
-All events are published with an envelope structure:
+**Returns:** Normalized pattern string
+
+**Throws:** Error if pattern is invalid
+
+#### `validateTransportFeatures(transportName: string, requiredFeatures: string[]): RoutingValidationResult`
+
+Validates transport capabilities against required features.
 
 ```typescript
-interface EventEnvelope {
-  header: {
-    id: string;           // Unique event identifier
-    type: string;         // Event type with namespace
-    origin: string;       // Source service name
-    timestamp: string;    // ISO timestamp
-    hash: string;         // SHA-256 hash for idempotency
-    version: string;      // Schema version
+const result = router.validateTransportFeatures('redis', ['patternRouting', 'batching']);
+if (result.valid) {
+  console.log('Transport supports all required features');
+} else {
+  console.log('Unsupported features:', result.unsupportedFeatures);
+}
+```
+
+**Parameters:**
+- `transportName`: Name of transport to validate
+- `requiredFeatures`: Array of required feature names
+
+**Returns:** RoutingValidationResult with validation details
+
+## Transport Plugins
+
+### Redis Streams Plugin
+
+The Redis Streams plugin provides enterprise-grade Redis-based event streaming with advanced features.
+
+```typescript
+import { RedisStreamsPlugin } from '@logistically/events';
+
+const plugin = new RedisStreamsPlugin();
+const transport = plugin.createTransport({
+  url: 'redis://localhost:6379',
+  consumerGroup: 'my-service-group',
+  batchSize: 100,
+  maxRetries: 3,
+  enableDLQ: true,
+  dlqStreamPrefix: 'dlq:',
+  maxRetriesBeforeDLQ: 3
+});
+```
+
+**Key Features:**
+- **Consumer Groups**: Reliable message consumption with automatic offset management
+- **Dead Letter Queues**: Automatic handling of failed messages
+- **Batching**: High-performance batch publishing and consumption
+- **Partitioning**: Parallel processing support
+- **Message Ordering**: Strict ordering guarantees
+- **Schema Validation**: Built-in message schema validation
+- **Message Replay**: Historical message replay capabilities
+- **Redis Cluster**: Support for Redis cluster deployments
+
+**Configuration Options:**
+```typescript
+interface RedisStreamsConfig {
+  // Connection
+  url?: string;
+  host?: string;
+  port?: number;
+  password?: string;
+  db?: number;
+  
+  // Consumer settings
+  consumerGroup: string;
+  batchSize?: number;
+  blockTime?: number;
+  maxRetries?: number;
+  retryDelay?: number;
+  
+  // Dead letter queue
+  enableDLQ?: boolean;
+  dlqStreamPrefix?: string;
+  maxRetriesBeforeDLQ?: number;
+  
+  // Performance
+  pipelineSize?: number;
+  maxLen?: number;
+  trimStrategy?: 'MAXLEN' | 'MINID';
+}
+```
+
+### Memory Transport Plugin
+
+The Memory Transport plugin provides an in-memory event transport for testing and development.
+
+```typescript
+import { MemoryTransportPlugin } from '@logistically/events';
+
+const plugin = new MemoryTransportPlugin();
+const transport = plugin.createTransport({
+  enablePatternRouting: true,
+  enableBatching: true
+});
+```
+
+**Key Features:**
+- **In-Memory Storage**: Fast, non-persistent event storage
+- **Pattern Routing**: Support for wildcard subscriptions
+- **Batching**: Batch publishing and consumption
+- **Testing**: Ideal for unit tests and development
+
+## Configuration Interfaces
+
+### EventSystemConfig
+
+```typescript
+interface EventSystemConfig {
+  service: string;
+  transports: Map<string, Transport>;
+  routing?: RoutingConfig;
+  
+  // Publisher configuration
+  publisher?: {
+    batching?: BatchingConfig;
+    retry?: RetryConfig;
+    rateLimiting?: RateLimitingConfig;
+    validationMode?: 'strict' | 'warn' | 'ignore';
   };
-  body: any;             // Event payload
+  
+  // Consumer configuration
+  consumer?: {
+    enablePatternRouting?: boolean;
+    enableConsumerGroups?: boolean;
+    poisonMessageHandler?: PoisonMessageHandler;
+    validationMode?: 'strict' | 'warn' | 'ignore';
+  };
+  
+  // Global configuration
+  validationMode?: 'strict' | 'warn' | 'ignore';
+  originPrefix?: string;
+  origins?: string[];
 }
 ```
 
-## Configuration Options
-
-### EventPublisherOptions
+### BatchingConfig
 
 ```typescript
-interface EventPublisherOptions {
-  originServiceName: string;           // Service name for event routing
-  validator?: EventValidator;          // Event validation
-  eventNamespace?: string;             // Event namespace
-  routingConfig?: RoutingConfig;       // Custom routing rules
+interface BatchingConfig {
+  enabled: boolean;
+  maxSize: number;
+  maxWaitMs: number;
+  maxConcurrentBatches: number;
+  strategy: 'time' | 'size' | 'partition';
+  compression?: boolean;
 }
 ```
 
-### BatchedEventPublisherOptions
+### RetryConfig
 
 ```typescript
-interface BatchedEventPublisherOptions extends EventPublisherOptions {
-  batchConfig?: BatchConfig;
-  transportType?: TransportType;       // 'redis' | 'console'
-  typePrefix?: string;                 // Event type prefix
-  batchingTypeStrategy?: BatchingTypeStrategy; // 'exact' | '0' | '1'
+interface RetryConfig {
+  maxRetries: number;
+  backoffStrategy: 'fixed' | 'exponential' | 'fibonacci';
+  baseDelay: number;
+  maxDelay: number;
+}
+```
+
+### RateLimitingConfig
+
+```typescript
+interface RateLimitingConfig {
+  maxRequests: number;
+  timeWindow: number;
+  strategy: 'sliding-window' | 'token-bucket';
 }
 ```
 
@@ -557,198 +810,606 @@ interface BatchedEventPublisherOptions extends EventPublisherOptions {
 
 ```typescript
 interface RoutingConfig {
-  default: string;                     // Default transport
-  routes: RouteConfig[];               // Route configurations
-}
-
-interface RouteConfig {
-  pattern: string;                     // Event pattern (e.g., 'user.*')
-  transport: string;                   // Transport name
-  prefix?: string;                     // Event prefix
-  priority?: 'high' | 'normal' | 'low'; // Priority level
-}
-```
-
-## Type Definitions
-
-### BatchingTypeStrategy
-
-```typescript
-type BatchingTypeStrategy = 'exact' | '0' | '1';
-```
-
-### TransportType
-
-```typescript
-type TransportType = 'redis' | 'console';
-```
-
-### ValidationResult
-
-```typescript
-interface ValidationResult {
-  valid: boolean;
-  error?: string;
+  routes: EventRoute[];
+  validationMode: 'strict' | 'warn' | 'ignore';
+  originPrefix?: string;
+  topicMapping: { [pattern: string]: string };
+  defaultTopicStrategy: 'namespace' | 'custom';
+  customTopicWord?: string;
+  enablePatternRouting?: boolean;
+  enableBatching?: boolean;
+  enablePartitioning?: boolean;
+  enableConsumerGroups?: boolean;
 }
 ```
 
-### EventHandler
+### EventRoute
 
 ```typescript
-type EventHandler = (body: any, header: EventHeader) => Promise<void>;
-```
-
-## Production Patterns
-
-### Idempotent Processing
-
-```typescript
-consumer.addHandler('order.created', async (body, header) => {
-  // Check if already processed
-  const processed = await checkIfProcessed(header.hash);
-  if (processed) {
-    console.log('Order already processed:', header.id);
-    return;
-  }
-  
-  try {
-    // Process order
-    await processOrder(body);
-    
-    // Mark as processed
-    await markAsProcessed(header.hash);
-  } catch (error) {
-    console.error('Failed to process order:', error);
-    throw error; // Will trigger retry
-  }
-});
-```
-
-### Dead Letter Queue Handling
-
-```typescript
-// Configure consumer with dead letter queue
-const consumer = new RedisStreamsServer({
-  host: 'localhost',
-  port: 6379,
-  stream: 'order-events',
-  group: 'order-processors',
-  consumer: 'worker-1',
-  deadLetterStream: 'order-events-dlq',
-  retryAttempts: 3
-});
-
-// Process dead letter messages
-const dlqConsumer = new RedisStreamsServer({
-  host: 'localhost',
-  port: 6379,
-  stream: 'order-events-dlq',
-  group: 'dlq-processors',
-  consumer: 'dlq-worker-1'
-});
-
-dlqConsumer.addHandler('*', async (body, header) => {
-  console.error('Dead letter message:', { body, header });
-  // Log, alert, or manually process
-});
-```
-
-### Health Monitoring
-
-```typescript
-// Health check endpoint
-app.get('/health', async (req, res) => {
-  try {
-    // Check Redis connection
-    await redisClient.ping();
-    
-    // Check consumer status
-    const consumerStatus = await consumer.getStatus();
-    
-    // Check failed messages
-    const failedMessages = batchedPublisher.getFailedMessages();
-    
-    res.json({
-      status: 'healthy',
-      redis: 'connected',
-      consumer: consumerStatus,
-      failedMessages: failedMessages.length
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'unhealthy',
-      error: error.message
-    });
-  }
-});
-```
-
-### Custom Metrics Collection
-
-```typescript
-// Simple metrics collection
-class EventMetrics {
-  private publishedEvents = 0;
-  private failedEvents = 0;
-  private processedEvents = 0;
-  private failedProcessing = 0;
-
-  incrementPublished() {
-    this.publishedEvents++;
-  }
-
-  incrementFailed() {
-    this.failedEvents++;
-  }
-
-  incrementProcessed() {
-    this.processedEvents++;
-  }
-
-  incrementFailedProcessing() {
-    this.failedProcessing++;
-  }
-
-  getMetrics() {
-    return {
-      publishedEvents: this.publishedEvents,
-      failedEvents: this.failedEvents,
-      processedEvents: this.processedEvents,
-      failedProcessing: this.failedProcessing,
-      publishSuccessRate: this.publishedEvents / (this.publishedEvents + this.failedEvents),
-      processingSuccessRate: this.processedEvents / (this.processedEvents + this.failedProcessing)
+interface EventRoute {
+  pattern: string;
+  transport: string;
+  priority?: number;
+  options?: {
+    topic?: string;
+    partition?: number;
+    ordering?: 'strict' | 'per-partition' | 'none';
+    retention?: {
+      maxAge?: number;
+      maxSize?: number;
+      maxMessages?: number;
     };
-  }
+  };
 }
+```
 
-const metrics = new EventMetrics();
+## Transport Interfaces
 
-// Wrap publisher methods
-const instrumentedPublisher = {
-  publish: async (eventType: string, body: any) => {
-    try {
-      await publisher.publish(eventType, body);
-      metrics.incrementPublished();
-    } catch (error) {
-      metrics.incrementFailed();
-      throw error;
-    }
-  }
+### Transport
+
+```typescript
+interface Transport {
+  readonly name: string;
+  readonly capabilities: TransportCapabilities;
+  
+  // Core methods
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  isConnected(): boolean;
+  
+  // Publishing
+  publish(topic: string, message: any, options?: PublishOptions): Promise<void>;
+  
+  // Subscription
+  subscribe(topic: string, handler: MessageHandler, options?: SubscribeOptions): Promise<void>;
+  unsubscribe(topic: string): Promise<void>;
+  
+  // Lifecycle
+  close(): Promise<void>;
+  
+  // Health and status
+  getStatus(): Promise<TransportStatus>;
+  getMetrics(): Promise<TransportMetrics>;
+}
+```
+
+### AdvancedTransport
+
+```typescript
+interface AdvancedTransport extends Transport {
+  // Pattern-based routing (optional)
+  subscribePattern?(pattern: string, handler: PatternHandler, options?: SubscribeOptions): Promise<void>;
+  unsubscribePattern?(pattern: string): Promise<void>;
+  
+  // Batching (optional)
+  publishBatch?(topic: string, messages: any[], options?: PublishOptions & BatchOptions): Promise<void>;
+  
+  // Partitioning (optional)
+  createPartition?(topic: string, partitionId: string, options?: any): Promise<void>;
+  deletePartition?(topic: string, partitionId: string): Promise<void>;
+  
+  // Consumer groups (optional)
+  createConsumerGroup?(topic: string, groupId: string, options?: any): Promise<void>;
+  deleteConsumerGroup?(topic: string, groupId: string): Promise<void>;
+  
+  // Topic management (optional)
+  createTopic?(name: string, options?: TopicOptions): Promise<void>;
+  deleteTopic?(name: string): Promise<void>;
+  getTopicInfo?(name: string): Promise<TopicInfo>;
+  
+  // Dead letter queues (optional)
+  createDeadLetterQueue?(topic: string, options?: DeadLetterQueueOptions): Promise<void>;
+  moveToDeadLetter?(topic: string, message: EventEnvelope, reason: string): Promise<void>;
+}
+```
+
+### TransportCapabilities
+
+```typescript
+interface TransportCapabilities {
+  // Core capabilities
+  supportsPublishing: boolean;
+  supportsSubscription: boolean;
+  supportsBatching: boolean;
+  supportsPartitioning: boolean;
+  supportsOrdering: boolean;
+  supportsPatternRouting: boolean;
+  supportsConsumerGroups: boolean;
+  supportsDeadLetterQueues: boolean;
+  supportsMessageRetention: boolean;
+  supportsMessageCompression: boolean;
+  
+  // Performance characteristics
+  maxMessageSize: number;
+  maxBatchSize: number;
+  maxTopics: number;
+  maxPartitions: number;
+  maxConsumerGroups: number;
+  
+  // Reliability features
+  supportsPersistence: boolean;
+  supportsReplication: boolean;
+  supportsFailover: boolean;
+  supportsTransactions: boolean;
+  
+  // Monitoring and observability
+  supportsMetrics: boolean;
+  supportsTracing: boolean;
+  supportsHealthChecks: boolean;
+}
+```
+
+## Message Interfaces
+
+### EventEnvelope
+
+```typescript
+interface EventEnvelope<T = any> {
+  header: {
+    id: string;
+    type: string;
+    origin: string;
+    originPrefix?: string;
+    timestamp: string;
+    hash: string;
+    version: string;
+  };
+  body: T;
+}
+```
+
+### MessageMetadata
+
+```typescript
+interface MessageMetadata {
+  topic: string;
+  partition?: number;
+  offset: string;
+  timestamp: number;
+  headers?: Record<string, string>;
+  matchedPattern?: string;
+  correlationId?: string;
+  traceId?: string;
+}
+```
+
+### MessageHandler
+
+```typescript
+type MessageHandler<T = any> = (message: EventEnvelope<T>, metadata: MessageMetadata) => Promise<void> | void;
+```
+
+### PatternHandler
+
+```typescript
+type PatternHandler<T = any> = (message: EventEnvelope<T>, metadata: MessageMetadata, matchedPattern: string) => Promise<void> | void;
+```
+
+### PoisonMessageHandler
+
+```typescript
+type PoisonMessageHandler = (message: any, error: Error, metadata: any) => Promise<void>;
+```
+
+## Statistics Interfaces
+
+### PublisherStats
+
+```typescript
+interface PublisherStats {
+  totalMessagesSent: number;
+  totalMessagesSentByType: Record<string, number>;
+  totalMessagesSentByTransport: Record<string, number>;
+  totalBatchesSent: number;
+  failedMessages: number;
+  averageLatency: number;
+  lastError?: string;
+  lastErrorTime?: string;
+}
+```
+
+### ConsumerStats
+
+```typescript
+interface ConsumerStats {
+  totalMessagesReceived: number;
+  totalMessagesReceivedByType: Record<string, number>;
+  totalMessagesReceivedByTransport: Record<string, number>;
+  totalMessagesReceivedByTopic: Record<string, number>;
+  failedMessages: number;
+  poisonMessages: number;
+  averageProcessingTime: number;
+  lastError?: string;
+  lastErrorTime?: string;
+  lastMessageTime?: string;
+}
+```
+
+### EventSystemStatus
+
+```typescript
+interface EventSystemStatus {
+  connected: boolean;
+  healthy: boolean;
+  transports: Map<string, TransportStatus>;
+  publisher: PublisherStatus;
+  consumer: ConsumerStatus;
+  uptime: number;
+  version: string;
+}
+```
+
+### TransportStatus
+
+```typescript
+interface TransportStatus {
+  connected: boolean;
+  healthy: boolean;
+  lastError?: string;
+  lastErrorTime?: string;
+  uptime: number;
+  version: string;
+}
+```
+
+## Utility Functions
+
+### createBasicRoutingConfig
+
+```typescript
+function createBasicRoutingConfig(
+  routes: EventRoute[],
+  validationMode: 'strict' | 'warn' | 'ignore' = 'warn',
+  originPrefix?: string,
+  topicMapping: { [pattern: string]: string } = {},
+  defaultTopicStrategy: 'namespace' | 'custom' = 'namespace',
+  customTopicWord?: string
+): RoutingConfig
+```
+
+Creates a basic routing configuration with sensible defaults.
+
+```typescript
+const config = createBasicRoutingConfig(
+  [{ pattern: 'user.*', transport: 'redis' }],
+  'warn',
+  'eu.de',
+  { 'user.*': 'user' },
+  'namespace'
+);
+```
+
+### createEventRouter
+
+```typescript
+function createEventRouter(
+  config: RoutingConfig,
+  transportCapabilities: Map<string, TransportCapabilities>
+): EventRouter
+```
+
+Creates a new EventRouter instance with validation.
+
+```typescript
+const router = createEventRouter(routingConfig, transportCapabilities);
+```
+
+### createEventSystem
+
+```typescript
+function createEventSystem(config: EventSystemConfig): EventSystem
+```
+
+Creates an EventSystem directly from configuration.
+
+```typescript
+const eventSystem = createEventSystem({
+  service: 'my-service',
+  transports: new Map([['redis', redisTransport]]),
+  validationMode: 'warn'
+});
+```
+
+## Constants
+
+### Default Values
+
+```typescript
+// Default routing configuration
+export const defaultRoutingConfig: RoutingConfig = {
+  routes: [],
+  validationMode: 'warn',
+  topicMapping: {},
+  defaultTopicStrategy: 'namespace',
+  enablePatternRouting: false,
+  enableBatching: false,
+  enablePartitioning: false,
+  enableConsumerGroups: false
 };
 
-// Wrap consumer handlers
-consumer.addHandler('user.created', async (body, header) => {
-  try {
-    await createUser(body);
-    metrics.incrementProcessed();
-  } catch (error) {
-    metrics.incrementFailedProcessing();
-    throw error;
-  }
-});
+// Default validation mode
+export const DEFAULT_VALIDATION_MODE: 'strict' | 'warn' | 'ignore' = 'warn';
+```
 
-// Expose metrics endpoint
-app.get('/metrics', (req, res) => {
-  res.json(metrics.getMetrics());
+## Error Types
+
+### ValidationError
+
+```typescript
+class ValidationError extends Error {
+  constructor(message: string, details?: any);
+  details?: any;
+}
+```
+
+### ConfigurationError
+
+```typescript
+class ConfigurationError extends Error {
+  constructor(message: string, config?: any);
+  config?: any;
+}
+```
+
+### TransportError
+
+```typescript
+class TransportError extends Error {
+  constructor(message: string, transport?: string, cause?: Error);
+  transport?: string;
+  cause?: Error;
+}
+```
+
+## Best Practices
+
+### 1. Service Naming
+
+Use descriptive service names that reflect your domain:
+
+```typescript
+// Good
+.service('user-management-service')
+.service('order-processing-service')
+
+// Avoid
+.service('service1')
+.service('api')
+```
+
+### 2. Event Type Naming
+
+Follow a consistent naming convention for event types:
+
+```typescript
+// Good - domain.action format
+'user.created'
+'order.completed'
+'payment.failed'
+
+// Avoid
+'userCreated'
+'order_completed'
+'PAYMENT_FAILED'
+```
+
+### 3. Origin Prefix Strategy
+
+Use origin prefixes for regional or organizational isolation:
+
+```typescript
+// Regional isolation
+.originPrefix('eu.de')  // European deployment
+.originPrefix('us.ca')  // US deployment
+
+// Organizational isolation
+.originPrefix('prod')   // Production environment
+.originPrefix('staging') // Staging environment
+```
+
+### 4. Transport Selection
+
+Choose transports based on your requirements:
+
+```typescript
+// High-performance, production use
+.addTransportFromFactory('redis', 'redis-streams', {
+  url: 'redis://redis-cluster:6379',
+  consumerGroup: 'my-service-group',
+  enableDLQ: true
+})
+
+// Development and testing
+.addTransportFromFactory('memory', 'memory', {
+  enablePatternRouting: true
+})
+```
+
+### 5. Error Handling
+
+Implement proper error handling for production systems:
+
+```typescript
+.setPoisonMessageHandler(async (message, error, metadata) => {
+  // Log to monitoring system
+  await logToDatadog({
+    level: 'error',
+    message: 'Poison message detected',
+    error: error.message,
+    eventType: message.header?.type,
+    metadata
+  });
+  
+  // Store in dead letter queue for investigation
+  await storeInDLQ(message, error, metadata);
 });
 ```
+
+## Migration Guide
+
+### From v2.x to v3.x
+
+#### Breaking Changes
+
+1. **EventSystemBuilder API**: Fluent API replaces configuration object
+2. **Transport Registration**: Explicit transport registration required
+3. **Validation Modes**: New validation modes with stricter defaults
+4. **Origin Prefix**: New origin prefix system for regional isolation
+
+#### Migration Steps
+
+1. **Update Builder Usage**:
+   ```typescript
+   // Old
+   const eventSystem = new EventSystem(config);
+   
+   // New
+   const eventSystem = createEventSystemBuilder()
+     .service('my-service')
+     .addTransportFromFactory('redis', 'redis-streams', {
+       url: 'redis://localhost:6379'
+     })
+     .build();
+   ```
+
+2. **Update Transport Configuration**:
+   ```typescript
+   // Old
+   config.transports = { redis: redisTransport };
+   
+   // New
+   .addTransport('redis', redisTransport)
+   ```
+
+3. **Update Validation**:
+   ```typescript
+   // Old
+   config.validation = 'loose';
+   
+   // New
+   .setValidationMode('ignore')
+   ```
+
+#### New Features
+
+1. **Origin Prefix System**: Regional isolation support
+2. **Enhanced Batching**: Multiple batching strategies
+3. **Advanced Retry**: Configurable retry strategies
+4. **Rate Limiting**: Built-in rate limiting
+5. **Poison Message Handling**: Configurable failed message handling
+6. **Pattern Routing**: Advanced pattern-based routing
+7. **Consumer Groups**: Reliable message consumption
+8. **Message Partitioning**: Parallel processing support
+9. **Dead Letter Queues**: Automatic failed message handling
+10. **Enterprise Features**: Message ordering, replay, and schema validation
+
+## Examples
+
+### Basic Event System
+
+```typescript
+import { createEventSystemBuilder, RedisStreamsPlugin } from '@logistically/events';
+
+const eventSystem = createEventSystemBuilder()
+  .service('notification-service')
+  .addTransportFromFactory('redis', 'redis-streams', {
+    url: 'redis://localhost:6379',
+    consumerGroup: 'notification-service-group'
+  })
+  .build();
+
+await eventSystem.connect();
+
+// Publish notification events
+await eventSystem.publisher.publish('notification.sent', {
+  userId: '123',
+  type: 'email',
+  content: 'Welcome to our service!'
+});
+
+// Subscribe to notification events
+await eventSystem.consumer.subscribe('notification.sent', async (message, metadata) => {
+  const { userId, type, content } = message.body;
+  console.log(`Sending ${type} notification to user ${userId}: ${content}`);
+});
+```
+
+### Advanced Event System with Multiple Transports
+
+```typescript
+import { createEventSystemBuilder, RedisStreamsPlugin, MemoryTransportPlugin } from '@logistically/events';
+
+const eventSystem = createEventSystemBuilder()
+  .service('order-service')
+  .originPrefix('eu.de')
+  .addTransportFromFactory('redis', 'redis-streams', {
+    url: 'redis://redis-cluster:6379',
+    consumerGroup: 'order-service-group',
+    enableDLQ: true,
+    maxRetries: 3
+  })
+  .addTransportFromFactory('memory', 'memory', {
+    enablePatternRouting: true
+  })
+  .enablePublisherBatching({
+    enabled: true,
+    maxSize: 1000,
+    maxWaitMs: 100,
+    maxConcurrentBatches: 5,
+    strategy: 'size'
+  })
+  .enableConsumerPatternRouting()
+  .enableConsumerGroups()
+  .setPoisonMessageHandler(async (message, error, metadata) => {
+    console.error('Poison message:', message, error);
+    await logToMonitoringSystem(message, error);
+  })
+  .build();
+
+await eventSystem.connect();
+
+// Subscribe to all order events
+await eventSystem.consumer.subscribePattern('order.*', async (message, metadata, pattern) => {
+  console.log(`Order event ${pattern}:`, message.body);
+});
+
+// Publish order events
+await eventSystem.publisher.publish('order.created', {
+  orderId: 'ORD-123',
+  customerId: 'CUST-456',
+  total: 99.99
+});
+```
+
+### Custom Routing Configuration
+
+```typescript
+import { createEventSystemBuilder, createBasicRoutingConfig } from '@logistically/events';
+
+const routingConfig = createBasicRoutingConfig(
+  [
+    { pattern: 'user.*', transport: 'redis', options: { topic: 'user-events' } },
+    { pattern: 'order.*', transport: 'redis', options: { topic: 'order-events' } },
+    { pattern: 'payment.*', transport: 'redis', options: { topic: 'payment-events' } }
+  ],
+  'warn',
+  'eu.de',
+  {
+    'user.*': 'user',
+    'order.*': 'order',
+    'payment.*': 'payment'
+  },
+  'namespace'
+);
+
+const eventSystem = createEventSystemBuilder()
+  .service('gateway-service')
+  .originPrefix('eu.de')
+  .routing(routingConfig)
+  .addTransportFromFactory('redis', 'redis-streams', {
+    url: 'redis://localhost:6379'
+  })
+  .build();
+```
+
+This comprehensive API documentation now accurately reflects the actual implementation and provides developers with all the information they need to effectively use the library.
