@@ -1,6 +1,6 @@
 {
   "name": "@logistically/events",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "A production-ready event-driven architecture library with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
