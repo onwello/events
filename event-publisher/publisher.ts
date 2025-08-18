@@ -160,8 +160,8 @@ export class EventPublisher {
       }
       
       // Update stats
-      const latency = Date.now() - startTime;
-      this.updateStats(eventType, 'default', latency);
+      const totalTime = Date.now() - startTime;
+      this.updateStats(eventType, 'default', totalTime);
       
     } catch (error) {
       this.handleError(error, eventType);

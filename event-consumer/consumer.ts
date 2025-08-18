@@ -82,6 +82,7 @@ export class EventConsumer {
     options?: SubscribeOptions
   ): Promise<void> {
     const resolvedTopic = this.router.resolveTopic(eventType);
+    
     const transport = this.getTransportForEvent(eventType);
     
     // Find the transport name by comparing the transport instance

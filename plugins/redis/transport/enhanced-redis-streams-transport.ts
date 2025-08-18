@@ -25,6 +25,13 @@ export interface RedisStreamsConfig {
   db?: number;
   password?: string;
   
+  // Connection pooling for concurrent publishing
+  connectionPool?: {
+    enabled: boolean;
+    size: number; // Number of Redis connections in the pool
+    maxConcurrentPublishers: number; // Max concurrent publishing operations
+  };
+  
   // Consumer group settings
   groupId?: string;
   consumerId?: string;
@@ -49,7 +56,8 @@ export interface RedisStreamsConfig {
   // Performance settings
   enablePipelining?: boolean;
   pipelineSize?: number;
-  
+  skipStreamGroupCheck?: boolean;  // Skip ensureStreamAndGroup calls for performance
+  enableMetrics?: boolean;  // Enable/disable metrics collection for performance
 
 
   // Enterprise features
@@ -81,9 +89,12 @@ export class EnhancedRedisStreamsTransport implements Transport {
   readonly capabilities: TransportCapabilities;
   
   private redis: Redis;
+  private connectionPool: Redis[] = [];
+  private poolSemaphore: { available: number; waiting: Array<() => void> } = { available: 0, waiting: [] };
   private connected = false;
   private config: RedisStreamsConfig;
   private subscriptions: Map<string, StreamSubscription> = new Map();
+  private ensuredStreams: Set<string> = new Set(); // Track which streams have been ensured
   private metrics: {
     messagesPublished: number;
     messagesReceived: number;
@@ -121,8 +132,20 @@ export class EnhancedRedisStreamsTransport implements Transport {
       maxRetriesBeforeDLQ: 3,
       enablePipelining: true,
       pipelineSize: 100,
+      skipStreamGroupCheck: false,
+      enableMetrics: true,
+      connectionPool: {
+        enabled: false,
+        size: 5,
+        maxConcurrentPublishers: 10
+      },
       ...config
     };
+    
+    // Initialize connection pool if enabled
+    if (this.config.connectionPool?.enabled) {
+      this.initializeConnectionPool();
+    }
     
     this.startTime = Date.now();
     this.metrics = {
@@ -168,6 +191,74 @@ export class EnhancedRedisStreamsTransport implements Transport {
     // Initialize replay manager
     if (this.config.replay?.enabled) {
       this.replayManager = new MessageReplayManager(this.redis, this.config.replay);
+    }
+  }
+
+  /**
+   * Initialize connection pool for concurrent publishing
+   */
+  private initializeConnectionPool(): void {
+    const poolSize = this.config.connectionPool?.size || 5;
+    const maxConcurrent = this.config.connectionPool?.maxConcurrentPublishers || 10;
+    
+    // Create additional Redis connections for the pool
+    for (let i = 0; i < poolSize; i++) {
+      let connection: Redis;
+      if (this.config.url) {
+        connection = new Redis(this.config.url);
+      } else {
+        connection = new Redis({
+          host: this.config.host || 'localhost',
+          port: this.config.port || 6379,
+          db: this.config.db || 0,
+          password: this.config.password,
+          lazyConnect: true
+        });
+      }
+      this.connectionPool.push(connection);
+    }
+    
+    // Initialize semaphore
+    this.poolSemaphore.available = maxConcurrent;
+  }
+
+  /**
+   * Acquire a connection from the pool
+   */
+  private async acquireConnection(): Promise<Redis> {
+    if (!this.config.connectionPool?.enabled) {
+      return this.redis; // Use main connection if pooling is disabled
+    }
+
+    // Wait for available slot
+    while (this.poolSemaphore.available <= 0) {
+      const waitPromise = new Promise<void>(resolve => {
+        this.poolSemaphore.waiting.push(resolve);
+      });
+      await waitPromise;
+    }
+
+    this.poolSemaphore.available--;
+    
+    // Return a random connection from the pool
+    const randomIndex = Math.floor(Math.random() * this.connectionPool.length);
+    return this.connectionPool[randomIndex];
+  }
+
+  /**
+   * Release a connection back to the pool
+   */
+  private releaseConnection(): void {
+    if (!this.config.connectionPool?.enabled) {
+      return;
+    }
+
+    this.poolSemaphore.available++;
+    
+    // Resolve waiting promises if any
+    if (this.poolSemaphore.waiting.length > 0) {
+      const resolve = this.poolSemaphore.waiting.shift();
+      if (resolve) resolve();
     }
   }
 
@@ -235,6 +326,14 @@ export class EnhancedRedisStreamsTransport implements Transport {
     
     try {
       await this.redis.ping();
+      
+      // Connect all pool connections if enabled
+      if (this.config.connectionPool?.enabled) {
+        for (const connection of this.connectionPool) {
+          await connection.ping();
+        }
+      }
+      
       this.connected = true;
     } catch (error) {
       throw new Error(`Failed to connect to Redis: ${error}`);
@@ -264,6 +363,20 @@ export class EnhancedRedisStreamsTransport implements Transport {
     }
     if (this.replayManager) {
       await this.replayManager.cleanup();
+    }
+    
+    // Clean up all subscriptions
+    for (const [streamName, subscription] of this.subscriptions.entries()) {
+      subscription.running = false;
+    }
+    this.subscriptions.clear();
+    
+    // Close all connection pool connections
+    if (this.config.connectionPool?.enabled) {
+      for (const connection of this.connectionPool) {
+        await connection.disconnect();
+      }
+      this.connectionPool = [];
     }
     
     await this.disconnect();
@@ -300,8 +413,13 @@ export class EnhancedRedisStreamsTransport implements Transport {
       sequence = await this.orderingManager.generateSequenceNumber(topic, options?.partitionKey);
     }
     
-    const envelope = createEventEnvelope(topic, 'redis-streams', message);
+    // Use the envelope passed from EventPublisher, don't create a new one
+    const envelope = message;
+    
     const streamName = `${this.config.streamPrefix}${topic}`;
+    
+    // Acquire connection from pool
+    const connection = await this.acquireConnection();
     
     try {
       await this.ensureStreamAndGroup(streamName);
@@ -315,13 +433,13 @@ export class EnhancedRedisStreamsTransport implements Transport {
         messageFields.push('partition', partition.toString());
       }
       
-      const messageId = await this.redis.xadd(streamName, '*', ...messageFields);
+      const messageId = await connection.xadd(streamName, '*', ...messageFields);
       
       if (this.config.maxLen) {
         if (this.config.trimStrategy === 'MAXLEN') {
-          await this.redis.xtrim(streamName, 'MAXLEN', this.config.maxLen);
+          await connection.xtrim(streamName, 'MAXLEN', this.config.maxLen);
         } else if (this.config.trimStrategy === 'MINID') {
-          await this.redis.xtrim(streamName, 'MINID', this.config.maxLen);
+          await connection.xtrim(streamName, 'MINID', this.config.maxLen);
         }
       }
       
@@ -330,15 +448,21 @@ export class EnhancedRedisStreamsTransport implements Transport {
         await this.partitioningManager.updatePartitionMetrics(partition, 1, 0);
       }
       
-      const latency = Date.now() - startTime;
-      this.metrics.messagesPublished++;
-      this.metrics.publishLatency.push(latency);
-      if (this.metrics.publishLatency.length > 100) {
-        this.metrics.publishLatency.shift();
+      const totalTime = Date.now() - startTime;      
+      
+      if (this.config.enableMetrics) {
+        this.metrics.messagesPublished++;
+        this.metrics.publishLatency.push(totalTime);
+        if (this.metrics.publishLatency.length > 100) {
+          this.metrics.publishLatency.shift();
+        }
       }
       
     } catch (error) {
       throw new Error(`Failed to publish to Redis stream: ${error}`);
+    } finally {
+      // Release connection back to pool
+      this.releaseConnection();
     }
   }
   
@@ -467,7 +591,9 @@ export class EnhancedRedisStreamsTransport implements Transport {
       
       try {
         await pipeline.exec();
+        if (this.config.enableMetrics) {
         this.metrics.messagesPublished += messages.length;
+      }
       } catch (error) {
         throw new Error(`Failed to publish batch to Redis stream: ${error}`);
       }
@@ -481,14 +607,23 @@ export class EnhancedRedisStreamsTransport implements Transport {
   // Private methods
   
   private async ensureStreamAndGroup(streamName: string, groupId?: string): Promise<void> {
+    // Skip if we've already ensured this stream
+    if (this.ensuredStreams.has(streamName)) {
+      return;
+    }
+    
     const targetGroupId = groupId || this.config.groupId!;
     
     try {
       await this.redis.xgroup('CREATE', streamName, targetGroupId, '$', 'MKSTREAM');
+      // Mark this stream as ensured
+      this.ensuredStreams.add(streamName);
     } catch (error: any) {
       if (!error.message.includes('BUSYGROUP')) {
         throw error;
       }
+      // Even if group already exists, mark stream as ensured
+      this.ensuredStreams.add(streamName);
     }
   }
   
@@ -510,7 +645,7 @@ export class EnhancedRedisStreamsTransport implements Transport {
                 await this.processMessage(subscription, id, fields);
               }
             }
-          }
+          } 
         } catch (error) {
           console.error(`Error consuming from stream ${subscription.streamName}:`, error);
           await this.sleep(this.config.retryDelay!);
@@ -559,10 +694,12 @@ export class EnhancedRedisStreamsTransport implements Transport {
         (subscription.metrics.averageProcessingTime * (subscription.metrics.messagesProcessed - 1) + processingTime) / 
         subscription.metrics.messagesProcessed;
       
-      this.metrics.messagesReceived++;
-      this.metrics.receiveLatency.push(processingTime);
-      if (this.metrics.receiveLatency.length > 100) {
-        this.metrics.receiveLatency.shift();
+      if (this.config.enableMetrics) {
+        this.metrics.messagesReceived++;
+        this.metrics.receiveLatency.push(processingTime);
+        if (this.metrics.receiveLatency.length > 100) {
+          this.metrics.receiveLatency.shift();
+        }
       }
       
     } catch (error) {
@@ -580,7 +717,9 @@ export class EnhancedRedisStreamsTransport implements Transport {
         
         await this.ackMessage(subscription.streamName, subscription.groupId, id);
         subscription.metrics.messagesFailed++;
-        this.metrics.errorRate++;
+        if (this.config.enableMetrics) {
+          this.metrics.errorRate++;
+        }
       }
     }
   }
@@ -624,6 +763,10 @@ export class EnhancedRedisStreamsTransport implements Transport {
   
   
   private async updateMetrics(): Promise<void> {
+    if (!this.config.enableMetrics) {
+      return;
+    }
+    
     try {
       this.metrics.memoryUsage = process.memoryUsage().heapUsed;
       this.metrics.lastUpdated = new Date();
