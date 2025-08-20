@@ -19,7 +19,7 @@ export class RedisStreamsPlugin implements TransportPlugin<RedisStreamsConfig> {
     supportsMessageRetention: true,
     supportsMessageCompression: false,
     maxMessageSize: 512 * 1024 * 1024,
-    maxBatchSize: 1000,
+    maxBatchSize: 5000,
     maxTopics: 10000,
     maxPartitions: 10000, // Support up to 10k partitions
     maxConsumerGroups: 1000,
@@ -80,8 +80,8 @@ export class RedisStreamsPlugin implements TransportPlugin<RedisStreamsConfig> {
     }
 
     // Validate consumer settings
-    if (config.batchSize && (config.batchSize < 1 || config.batchSize > 1000)) {
-      errors.push('batchSize must be between 1 and 1000');
+    if (config.batchSize && (config.batchSize < 1 || config.batchSize > 5000)) {
+      errors.push('batchSize must be between 1 and 5000');
     }
 
     if (config.blockTime && (config.blockTime < 0 || config.blockTime > 30000)) {

@@ -41,6 +41,9 @@ npm run benchmark -- --transport redis --scenario e2e-latency
 # Run throughput benchmark on memory transport
 npm run benchmark -- --transport memory --scenario throughput
 
+# Run publishing throughput benchmark on Redis
+npm run benchmark -- --transport redis --scenario publishing-throughput
+
 # Custom configuration
 npm run benchmark -- \
   --transport redis \
@@ -70,7 +73,7 @@ npm run test
 
 ### Basic Options
 - `--transport <transport>`: Transport to benchmark (redis, memory) - default: redis
-- `--scenario <scenario>`: Scenario to run (e2e-latency, throughput) - default: e2e-latency
+- `--scenario <scenario>`: Scenario to run (e2e-latency, throughput, publishing-throughput) - default: e2e-latency
 - `--iterations <number>`: Number of iterations - default: 3
 - `--warmup <number>`: Number of warmup runs - default: 1
 - `--message-count <number>`: Number of messages - default: 100
@@ -91,6 +94,16 @@ npm run benchmark -- \
   --scenario e2e-latency \
   --message-count 20000 \
   --consumers 2 \
+  --iterations 3
+
+# Publishing throughput benchmark with optimal batching
+npm run benchmark -- \
+  --transport redis \
+  --scenario publishing-throughput \
+  --message-count 100000 \
+  --batch-size 4000 \
+  --flush-interval 20 \
+  --publishers 1 \
   --iterations 3
 
 # Memory transport test

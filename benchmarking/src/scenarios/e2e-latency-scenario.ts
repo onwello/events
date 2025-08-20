@@ -82,7 +82,16 @@ export class E2ELatencyScenario implements BenchmarkScenario {
       description: 'Number of partitions when partitioning is enabled',
       min: 2,
       max: 16
-    }
+    },
+    {
+      name: 'concurrentPublishers',
+      type: 'number',
+      defaultValue: 1,
+      description: 'Number of concurrent publishers',
+      min: 1,
+      max: 10
+    },
+
   ];
 
   async execute(context: BenchmarkContext): Promise<IterationResult> {
@@ -96,8 +105,10 @@ export class E2ELatencyScenario implements BenchmarkScenario {
     const concurrentConsumers = configuration.parameters.concurrentConsumers || 1;
     const enablePartitioning = configuration.parameters.enablePartitioning || false;
     const partitionCount = configuration.parameters.partitionCount || 1;
+    const concurrentPublishers = configuration.parameters.concurrentPublishers || 1;
 
-    logger.info(`Configuration: ${messageCount} messages, ${messageSize} bytes, ${concurrentConsumers} consumers`);
+
+    logger.info(`Configuration: ${messageCount} messages, ${messageSize} bytes, ${concurrentConsumers} consumers, ${concurrentPublishers} publishers`);
 
     // Generate test data for this iteration
     const testData = this.generateTestData(messageCount, messageSize, iterationId);
@@ -111,29 +122,70 @@ export class E2ELatencyScenario implements BenchmarkScenario {
       const consumerReadyWait = concurrentConsumers > 1 ? 100 : 10;
       await new Promise(resolve => setTimeout(resolve, consumerReadyWait));
       
-      // Start publishing messages
+      // Start publishing messages with concurrent publishers
       const startTime = process.hrtime.bigint();
       logger.info('Starting message publishing...');
       
-      for (let i = 0; i < testData.length; i++) {
-        const message = testData[i];
-        const topic = topics[i];
-        const messageId = `${iterationId}-${i}`;
+      if (concurrentPublishers > 1) {
+        // Use concurrent publishers for better performance while maintaining individual message tracking
+        const messagesPerPublisher = Math.ceil(testData.length / concurrentPublishers);
+        const publishingPromises: Promise<void>[] = [];
         
-        try {
-          const publishTime = process.hrtime.bigint();
-          await transport.publisher.publish(topic, message);
+        for (let p = 0; p < concurrentPublishers; p++) {
+          const startIndex = p * messagesPerPublisher;
+          const endIndex = Math.min(startIndex + messagesPerPublisher, testData.length);
+          const publisherMessages = testData.slice(startIndex, endIndex);
+          const publisherTopics = topics.slice(startIndex, endIndex);
           
-          E2ELatencyScenario.trafficRecord.published.set(messageId, {
-            messageId,
-            publishTime: Number(publishTime),
-            iteration: iterationId
-          });
+          const publishingPromise = (async () => {
+            for (let i = 0; i < publisherMessages.length; i++) {
+              const message = publisherMessages[i];
+              const topic = publisherTopics[i];
+              const messageId = `${iterationId}-${startIndex + i}`;
+              
+              try {
+                const publishTime = process.hrtime.bigint();
+                await transport.publisher.publish(topic, message);
+                
+                E2ELatencyScenario.trafficRecord.published.set(messageId, {
+                  messageId,
+                  publishTime: Number(publishTime),
+                  iteration: iterationId
+                });
+              } catch (error) {
+                const errorMsg = `Failed to publish message ${messageId}: ${error}`;
+                E2ELatencyScenario.trafficRecord.errors.push(errorMsg);
+                logger.error(errorMsg);
+              }
+            }
+          })();
           
-        } catch (error) {
-          const errorMsg = `Failed to publish message ${messageId}: ${error}`;
-          E2ELatencyScenario.trafficRecord.errors.push(errorMsg);
-          logger.error(errorMsg);
+          publishingPromises.push(publishingPromise);
+        }
+        
+        // Wait for all publishers to complete
+        await Promise.all(publishingPromises);
+      } else {
+        // Single publisher (original logic)
+        for (let i = 0; i < testData.length; i++) {
+          const message = testData[i];
+          const topic = topics[i];
+          const messageId = `${iterationId}-${i}`;
+          
+          try {
+            const publishTime = process.hrtime.bigint();
+            await transport.publisher.publish(topic, message);
+            
+            E2ELatencyScenario.trafficRecord.published.set(messageId, {
+              messageId,
+              publishTime: Number(publishTime),
+              iteration: iterationId
+            });
+          } catch (error) {
+            const errorMsg = `Failed to publish message ${messageId}: ${error}`;
+            E2ELatencyScenario.trafficRecord.errors.push(errorMsg);
+            logger.error(errorMsg);
+          }
         }
       }
       

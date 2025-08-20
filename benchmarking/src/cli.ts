@@ -2,12 +2,17 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
+// Force-enable colors for chalk in environments where auto-detection fails
+if (!process.env.FORCE_COLOR) {
+  process.env.FORCE_COLOR = '1';
+}
 import ora from 'ora';
 import { BenchmarkRunner } from './core/benchmark-runner';
 import { RedisBenchmark } from './transports/redis-benchmark';
 import { MemoryBenchmark } from './transports/memory-benchmark';
 import { E2ELatencyScenario } from './scenarios/e2e-latency-scenario';
 import { ThroughputScenario } from './scenarios/throughput-scenario';
+import { PublishingThroughputScenario } from './scenarios/publishing-throughput-scenario';
 import { ConsoleLogger } from './core/console-logger';
 import { BenchmarkConfiguration } from './types';
 
@@ -22,7 +27,7 @@ program
   .command('run')
   .description('Run benchmarks')
   .option('-t, --transport <transport>', 'Transport to benchmark (redis, memory)', 'redis')
-  .option('-s, --scenario <scenario>', 'Scenario to run (e2e-latency, throughput)', 'e2e-latency')
+  .option('-s, --scenario <scenario>', 'Scenario to run (e2e-latency, throughput, publishing-throughput)', 'e2e-latency')
   .option('-i, --iterations <number>', 'Number of iterations', '3')
   .option('-w, --warmup <number>', 'Number of warmup runs', '1')
   .option('-c, --message-count <number>', 'Number of messages', '100')
@@ -58,14 +63,26 @@ program
         case 'throughput':
           scenario = new ThroughputScenario();
           break;
+        case 'publishing-throughput':
+          scenario = new PublishingThroughputScenario();
+          break;
         default:
           throw new Error(`Unsupported scenario: ${options.scenario}`);
       }
       
+      // Build transport config and override batching-related settings from CLI options
+      const transportConfig = {
+        ...transport.getDefaultConfig(),
+        // Ensure batching-related options are applied at the transport layer
+        batchSize: parseInt(options.batchSize),
+        flushInterval: parseInt(options.flushInterval),
+        concurrentPublishers: parseInt(options.publishers)
+      };
+
       // Build configuration
       const config: BenchmarkConfiguration = {
         transport: options.transport,
-        transportConfig: transport.getDefaultConfig(),
+        transportConfig,
         scenario: options.scenario,
         parameters: {
           messageCount: parseInt(options.messageCount),

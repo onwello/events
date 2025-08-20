@@ -20,7 +20,7 @@ export class RedisBenchmark implements TransportBenchmark {
     
     // Performance characteristics
     maxMessageSize: 1024 * 1024, // 1MB
-    maxBatchSize: 1000,
+    maxBatchSize: 5000,
     maxTopics: 10000,
     maxPartitions: 100,
     maxConsumerGroups: 1000,
@@ -47,15 +47,27 @@ export class RedisBenchmark implements TransportBenchmark {
       throw new Error(`Invalid Redis configuration: ${validation.errors.join(', ')}`);
     }
     
-    // Determine batching settings from config
-    const batchSize = mergedConfig.batchSize || 1;
-    const flushInterval = mergedConfig.flushInterval || 0;
-    const enableBatching = batchSize > 1 || flushInterval > 0;
-    
-    // Create EventSystem instance
-    const eventSystem = createEventSystemBuilder()
-      .service('benchmark-service')
-      .addTransportFromFactory('redis', 'redis-streams', mergedConfig)
+          // Determine batching settings from config
+      const batchSize = mergedConfig.batchSize || 1;
+      const flushInterval = mergedConfig.flushInterval || 0;
+      const enableBatching = batchSize > 1 || flushInterval > 0;
+      
+      // Batching configuration applied
+      
+      // Determine if we should use connection pooling based on concurrent publishers
+      const useConnectionPool = mergedConfig.concurrentPublishers > 1;
+      
+      // Create EventSystem instance
+      const eventSystem = createEventSystemBuilder()
+        .service('benchmark-service')
+        .addTransportFromFactory('redis', 'redis-streams', {
+          ...mergedConfig,
+          connectionPool: {
+            enabled: useConnectionPool,
+            size: useConnectionPool ? 10 : 1,
+            maxConcurrentPublishers: useConnectionPool ? 20 : 1
+          }
+        })
       .originPrefix('benchmark')
       .setValidationMode('warn')
       .routing({
@@ -101,7 +113,7 @@ export class RedisBenchmark implements TransportBenchmark {
       streamPrefix: 'stream:',
       maxLen: 10000,
       trimStrategy: 'MAXLEN',
-      batchSize: 100, // Increased from 1 for better throughput
+      batchSize: 2000, // Increased for better throughput with efficient batching
       blockTime: 50,  // Increased from 1ms to reduce polling frequency
       pollInterval: 10, // Increased from 1ms to reduce overhead
       maxRetries: 0,
@@ -110,14 +122,14 @@ export class RedisBenchmark implements TransportBenchmark {
       dlqStreamPrefix: 'dlq:',
       maxRetriesBeforeDLQ: 0,
       enablePipelining: true,
-      pipelineSize: 100,
+      pipelineSize: 1000,
       skipStreamGroupCheck: true,
       enableMetrics: false,
       // Enable connection pooling for concurrent publishing
       connectionPool: {
         enabled: true,
-        size: 10, // 10 Redis connections in the pool
-        maxConcurrentPublishers: 20 // Allow up to 20 concurrent publishing operations
+        size: 20, // 20 Redis connections in the pool
+        maxConcurrentPublishers: 40 // Allow up to 40 concurrent publishing operations
       }
     };
   }
@@ -144,8 +156,8 @@ export class RedisBenchmark implements TransportBenchmark {
       errors.push('Block time must be between 0 and 60000ms');
     }
     
-    if (config.batchSize && (config.batchSize < 1 || config.batchSize > 10000)) {
-      errors.push('Batch size must be between 1 and 10000');
+    if (config.batchSize && (config.batchSize < 1 || config.batchSize > 5000)) {
+      errors.push('Batch size must be between 1 and 5000');
     }
     
     // Validate partitioning

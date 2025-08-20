@@ -11,7 +11,7 @@ export interface BenchmarkResult {
   metrics: BenchmarkMetrics;
   environment: EnvironmentInfo;
   configuration: BenchmarkConfiguration;
-  statisticalSummary: StatisticalSummary;
+  statisticalSummary?: StatisticalSummary;
 }
 
 export interface BenchmarkMetrics {

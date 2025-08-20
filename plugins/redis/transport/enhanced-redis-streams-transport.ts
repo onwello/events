@@ -278,7 +278,7 @@ export class EnhancedRedisStreamsTransport implements Transport {
       supportsMessageRetention: true,
       supportsMessageCompression: false,
       maxMessageSize: 512 * 1024 * 1024,
-      maxBatchSize: Math.max(this.config.pipelineSize || 1000, 1000),
+      maxBatchSize: Math.max(this.config.pipelineSize || 5000, 5000),
       maxTopics: 10000,
       maxPartitions: 1,
       maxConsumerGroups: 1000,
@@ -413,8 +413,6 @@ export class EnhancedRedisStreamsTransport implements Transport {
       sequence = await this.orderingManager.generateSequenceNumber(topic, options?.partitionKey);
     }
     
-    // Use the envelope passed from EventPublisher, don't create a new one
-    const envelope = message;
     
     const streamName = `${this.config.streamPrefix}${topic}`;
     
@@ -425,7 +423,7 @@ export class EnhancedRedisStreamsTransport implements Transport {
       await this.ensureStreamAndGroup(streamName);
       
       // Add sequence information to message if ordering is enabled
-      const messageFields = ['data', JSON.stringify(envelope), 'timestamp', Date.now().toString(), 'topic', topic];
+      const messageFields = ['data', JSON.stringify(message), 'timestamp', Date.now().toString(), 'topic', topic];
       if (sequence) {
         messageFields.push('sequence', JSON.stringify(sequence));
       }
@@ -576,26 +574,69 @@ export class EnhancedRedisStreamsTransport implements Transport {
     await this.ensureStreamAndGroup(streamName);
     
     if (this.config.enablePipelining) {
-      const pipeline = this.redis.pipeline();
-      
-      for (const message of messages) {
-        const envelope = createEventEnvelope(topic, 'redis-streams', message);
-        pipeline.xadd(
-          streamName,
-          '*',
-          'data', JSON.stringify(envelope),
-          'timestamp', Date.now().toString(),
-          'topic', topic
-        );
-      }
+      // Use connection pool for batch publishing to support concurrency
+      const connection = await this.acquireConnection();
       
       try {
-        await pipeline.exec();
+        // ULTRA-EFFICIENT BATCHING: Create multiple batch envelopes and pipeline them together
+        // This combines the benefits of batching AND pipelining for maximum performance
+        const batchSize = this.config.pipelineSize || 1000; // Size of each batch envelope
+        const pipelineSize = 10; // Number of batch envelopes to pipeline together
+        const timestamp = Date.now().toString();
+        
+        // Process messages in pipeline batches of batch envelopes
+        for (let i = 0; i < messages.length; i += batchSize * pipelineSize) {
+          const pipeline = connection.pipeline();
+          let batchEnvelopesInPipeline = 0;
+          
+          // Create multiple batch envelopes for this pipeline
+          for (let j = 0; j < pipelineSize && i + j * batchSize < messages.length; j++) {
+            const startIdx = i + j * batchSize;
+            const endIdx = Math.min(startIdx + batchSize, messages.length);
+            const batch = messages.slice(startIdx, endIdx);
+            
+            if (batch.length > 0) {
+              // Create batch envelope for this batch
+              const batchEnvelope = {
+                data: batch, // Array of messages in this batch envelope
+                metadata: {
+                  batch: true,
+                  count: batch.length,
+                  timestamp: Date.now(),
+                  topic: topic
+                }
+              };
+              
+              const serializedBatch = JSON.stringify(batchEnvelope);
+              
+              // Add batch envelope to pipeline
+              pipeline.xadd(
+                streamName,
+                '*',
+                'data', serializedBatch,
+                'timestamp', timestamp,
+                'topic', topic,
+                'batch', 'true',
+                'count', batch.length.toString()
+              );
+              
+              batchEnvelopesInPipeline++;
+            }
+          }
+          
+          if (batchEnvelopesInPipeline > 0) {
+            // Execute the pipeline (single network round-trip for multiple batch envelopes)
+            await pipeline.exec();
+          }
+        }
+        
         if (this.config.enableMetrics) {
-        this.metrics.messagesPublished += messages.length;
-      }
+          this.metrics.messagesPublished += messages.length;
+        }
       } catch (error) {
         throw new Error(`Failed to publish batch to Redis stream: ${error}`);
+      } finally {
+        this.releaseConnection();
       }
     } else {
       for (const message of messages) {

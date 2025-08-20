@@ -44,7 +44,19 @@ export class MetricsCollector {
 
   private calculateLatencyMetrics(samples: number[]): BenchmarkMetrics['latency'] {
     if (samples.length === 0) {
-      throw new Error('No valid latency samples found');
+      // Return default latency metrics for scenarios without latency (e.g., publishing-only)
+      return {
+        min: 0,
+        max: 0,
+        mean: 0,
+        median: 0,
+        p50: 0,
+        p95: 0,
+        p99: 0,
+        p99_9: 0,
+        standardDeviation: 0,
+        samples: []
+      };
     }
 
     const sorted = [...samples].sort((a, b) => a - b);
@@ -95,18 +107,52 @@ export class MetricsCollector {
   }
 
   private calculateThroughputMetrics(results: IterationResult[]): BenchmarkMetrics['throughput'] {
-    const totalMessages = results.reduce((sum, r) => sum + r.receivedCount, 0);
-    const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
-    const totalDurationSeconds = totalDuration / 1e9; // Convert nanoseconds to seconds
+    // For publishing scenarios, use the throughput calculated by the scenario itself
+    // since the benchmark runner overrides duration with full iteration time
+    const iterationThroughputs: number[] = [];
+    const iterationBytesPerSecond: number[] = [];
     
-    const messagesPerSecond = totalDurationSeconds > 0 ? totalMessages / totalDurationSeconds : 0;
+    for (const result of results) {
+      const messageCount = result.receivedCount || result.publishedCount || 0;
+      
+      // Use scenario's calculated throughput if available, otherwise calculate from duration
+      let iterationThroughput = 0;
+      if (result.metadata?.throughput) {
+        // Use the throughput calculated by the scenario (more accurate for publishing)
+        iterationThroughput = result.metadata.throughput;
+      } else {
+        // Fallback to calculating from duration (for consumption scenarios)
+        const durationSeconds = result.duration / 1e9;
+        iterationThroughput = durationSeconds > 0 ? messageCount / durationSeconds : 0;
+      }
+      
+      if (iterationThroughput > 0) {
+        iterationThroughputs.push(iterationThroughput);
+        
+        // Calculate bytes per second for this iteration
+        const messageSize = result.metadata?.messageSize || 1024;
+        const iterationBytes = messageCount * messageSize;
+        const iterationBytesPerSec = iterationBytes * (iterationThroughput / messageCount);
+        iterationBytesPerSecond.push(iterationBytesPerSec);
+      }
+    }
     
-    // Calculate bytes (assuming each result has metadata with messageSize)
+    // Calculate average throughput across all iterations
+    const messagesPerSecond = iterationThroughputs.length > 0 
+      ? iterationThroughputs.reduce((sum, throughput) => sum + throughput, 0) / iterationThroughputs.length 
+      : 0;
+    
+    const bytesPerSecond = iterationBytesPerSecond.length > 0 
+      ? iterationBytesPerSecond.reduce((sum, bytesPerSec) => sum + bytesPerSec, 0) / iterationBytesPerSecond.length 
+      : 0;
+    
+    // Calculate total messages and bytes across all iterations
+    const totalMessages = results.reduce((sum, r) => sum + (r.receivedCount || r.publishedCount || 0), 0);
     const totalBytes = results.reduce((sum, r) => {
       const messageSize = r.metadata?.messageSize || 1024;
-      return sum + (r.receivedCount * messageSize);
+      const messageCount = r.receivedCount || r.publishedCount || 0;
+      return sum + (messageCount * messageSize);
     }, 0);
-    const bytesPerSecond = totalDurationSeconds > 0 ? totalBytes / totalDurationSeconds : 0;
 
     return {
       messagesPerSecond,

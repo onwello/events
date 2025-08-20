@@ -7,7 +7,8 @@ import {
   EnvironmentInfo,
   BenchmarkLogger,
   TransportBenchmark,
-  IterationResult
+  IterationResult,
+  StatisticalSummary
 } from '../types';
 import { MetricsCollector } from './metrics-collector';
 import { StatisticalAnalyzer } from './statistical-analyzer';
@@ -66,7 +67,16 @@ export class BenchmarkRunner {
       
       // Collect and analyze metrics
       const metrics = await this.metricsCollector.collect(results);
-      const statisticalSummary = this.statisticalAnalyzer.analyze(metrics.latency.samples);
+      
+      // Only perform statistical analysis if we have latency samples
+      let statisticalSummary: StatisticalSummary | undefined = undefined;
+      if (metrics.latency.samples.length >= 2) {
+        try {
+          statisticalSummary = this.statisticalAnalyzer.analyze(metrics.latency.samples);
+        } catch (error) {
+          this.logger.warn(`Statistical analysis failed: ${error}`);
+        }
+      }
       
       // Cleanup
       await transport.cleanup();
