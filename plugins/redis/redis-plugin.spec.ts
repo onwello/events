@@ -45,7 +45,7 @@ describe('RedisStreamsPlugin', () => {
       expect(capabilities.supportsPatternRouting).toBe(true);
       expect(capabilities.supportsMetrics).toBe(true);
       expect(capabilities.maxMessageSize).toBe(512 * 1024 * 1024);
-      expect(capabilities.maxBatchSize).toBe(1000);
+      expect(capabilities.maxBatchSize).toBe(5000);
     });
   });
 
@@ -106,11 +106,11 @@ describe('RedisStreamsPlugin', () => {
     });
 
     it('should reject invalid batchSize', () => {
-      const config = { host: 'localhost', batchSize: 2000 };
+      const config = { host: 'localhost', batchSize: 6000 };
       const result = plugin.validateConfig(config);
       
       expect(result.valid).toBe(false);
-      expect(result.errors).toContain('batchSize must be between 1 and 1000');
+      expect(result.errors).toContain('batchSize must be between 1 and 5000');
     });
 
     it('should reject invalid blockTime', () => {

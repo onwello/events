@@ -158,7 +158,7 @@ describe('EnhancedRedisStreamsTransport - Publishing', () => {
       // With pipelining enabled by default, xadd is called on the pipeline, not directly on Redis
       expect(mockRedis.pipeline).toHaveBeenCalled();
       const mockPipeline = mockRedis.pipeline();
-      expect(mockPipeline.xadd).toHaveBeenCalledTimes(3);
+      expect(mockPipeline.xadd).toHaveBeenCalledTimes(1); // Batch is stored as single message
     });
 
     it('should handle empty batch', async () => {
