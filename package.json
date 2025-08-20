@@ -10,7 +10,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:integration": "jest --config jest.integration.config.js",
-    "test:unit": "jest --testPathIgnorePatterns=integration-tests.spec.ts",
+    "test:unit": "jest --testPathIgnorePatterns='redis-integration-tests.spec.ts|redis-publishing.spec.ts|redis-basic-test.spec.ts'",
+    "test:redis": "jest --testPathPattern='redis-integration-tests.spec.ts|redis-publishing.spec.ts|redis-basic-test.spec.ts'",
     "example:origin-based": "ts-node examples/basic/origin-based-system.ts"
   },
   "repository": {
