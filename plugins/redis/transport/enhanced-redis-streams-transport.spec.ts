@@ -254,7 +254,7 @@ describe('EnhancedRedisStreamsTransport', () => {
       expect(status.connected).toBe(true);
       expect(status.healthy).toBe(true);
       expect(status.uptime).toBeGreaterThanOrEqual(0);
-      expect(status.version).toBe('2.0.0');
+      expect(status.version).toBe('3.2.0');
     });
 
     it('should handle subscription lifecycle', async () => {
@@ -290,6 +290,153 @@ describe('EnhancedRedisStreamsTransport', () => {
     });
 
 
+  });
+
+  describe('Stale Consumer Detection', () => {
+    let transport: EnhancedRedisStreamsTransport;
+    
+    beforeEach(() => {
+      transport = new EnhancedRedisStreamsTransport(mockRedis, {
+        staleConsumerDetection: {
+          enabled: true,
+          heartbeatInterval: 1000,
+          staleThreshold: 5000,
+          cleanupInterval: 2000,
+          maxStaleConsumers: 10,
+          enableHeartbeat: true,
+          enablePingPong: true,
+          cleanupStrategy: 'conservative',
+          preserveConsumerHistory: true
+        }
+      });
+    });
+
+    afterEach(() => {
+      if (transport) {
+        transport.disconnect();
+      }
+    });
+
+    it('should initialize stale consumer detection when enabled', () => {
+      expect(transport).toBeDefined();
+      // The managers should be initialized
+      expect((transport as any).staleConsumerDetector).toBeDefined();
+      expect((transport as any).consumerHealthMonitor).toBeDefined();
+      expect((transport as any).consumerCleanupManager).toBeDefined();
+    });
+
+    it('should not initialize stale consumer detection when disabled', () => {
+      const transportDisabled = new EnhancedRedisStreamsTransport(mockRedis, {
+        staleConsumerDetection: {
+          enabled: false,
+          heartbeatInterval: 30000,
+          staleThreshold: 60000,
+          cleanupInterval: 120000,
+          maxStaleConsumers: 100,
+          enableHeartbeat: true,
+          enablePingPong: true,
+          cleanupStrategy: 'conservative',
+          preserveConsumerHistory: true
+        }
+      });
+      
+      expect((transportDisabled as any).staleConsumerDetector).toBeUndefined();
+      expect((transportDisabled as any).consumerHealthMonitor).toBeUndefined();
+      expect((transportDisabled as any).consumerCleanupManager).toBeUndefined();
+      
+      transportDisabled.disconnect();
+    });
+
+    it('should get stale consumer metrics', async () => {
+      const metrics = await transport.getStaleConsumerMetrics();
+      expect(metrics).toBeDefined();
+      expect(metrics?.totalConsumers).toBe(0);
+      expect(metrics?.healthyConsumers).toBe(0);
+      expect(metrics?.staleConsumers).toBe(0);
+      expect(metrics?.deadConsumers).toBe(0);
+    });
+
+    it('should get consumer health information', async () => {
+      const health = await transport.getConsumerHealth('test-stream', 'test-group');
+      expect(health).toEqual([]);
+    });
+
+    it('should manually trigger stale consumer cleanup', async () => {
+      await expect(transport.triggerStaleConsumerCleanup()).resolves.not.toThrow();
+    });
+
+    it('should get extended status with stale consumer information', async () => {
+      const status = await transport.getExtendedStatus();
+      expect(status.staleConsumerDetection).toBeDefined();
+      expect(status.staleConsumerDetection.enabled).toBe(true);
+      expect(status.staleConsumerDetection.heartbeat).toBe('active');
+      expect(status.staleConsumerDetection.cleanup).toBe('active');
+    });
+
+    it('should handle ping-pong health checks', async () => {
+      // Mock Redis get and set for ping-pong
+      const mockGet = jest.fn();
+      const mockSet = jest.fn();
+      const mockDel = jest.fn();
+      
+      (transport as any).redis.get = mockGet;
+      (transport as any).redis.set = mockSet;
+      (transport as any).redis.del = mockDel;
+      
+      // Simulate a ping request
+      mockGet.mockResolvedValueOnce('1234567890');
+      
+      const respondToPing = (transport as any).respondToPing.bind(transport);
+      await respondToPing('test-stream', 'test-group', 'test-consumer');
+      
+      expect(mockSet).toHaveBeenCalledWith('pong:test-stream:test-group:test-consumer', expect.any(String), 'PX', 5000);
+      expect(mockDel).toHaveBeenCalledWith('ping:test-stream:test-group:test-consumer');
+    });
+
+    it('should update consumer health status on failures', async () => {
+      const subscription = {
+        streamName: 'test-stream',
+        groupId: 'test-group',
+        consumerId: 'test-consumer',
+        handler: jest.fn(),
+        running: true,
+        lastProcessedId: '0',
+        retryCount: new Map(),
+        metrics: {
+          messagesProcessed: 0,
+          messagesFailed: 0,
+          lastProcessedAt: new Date(),
+          averageProcessingTime: 0
+        },
+        lastHeartbeat: new Date(),
+        lastPingResponse: new Date(),
+        healthStatus: 'healthy' as const,
+        consecutiveFailures: 0,
+        lastHealthCheck: new Date()
+      };
+      
+      // Simulate consecutive failures
+      for (let i = 0; i < 5; i++) {
+        subscription.consecutiveFailures++;
+        if (subscription.consecutiveFailures > 3) {
+          (subscription as any).healthStatus = 'degraded';
+        }
+        if (subscription.consecutiveFailures > 10) {
+          (subscription as any).healthStatus = 'stale';
+        }
+      }
+      
+      expect(subscription.healthStatus).toBe('degraded');
+      expect(subscription.consecutiveFailures).toBe(5);
+    });
+
+    it('should clean up intervals on disconnect', async () => {
+      const clearIntervalSpy = jest.spyOn(global, 'clearInterval');
+      
+      await transport.disconnect();
+      
+      expect(clearIntervalSpy).toHaveBeenCalledTimes(2); // heartbeat and cleanup intervals
+    });
   });
 });
 

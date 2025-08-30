@@ -66,6 +66,19 @@ export interface RedisStreamsConfig {
   partitioning?: PartitioningConfig;
   schema?: SchemaConfig;
   replay?: ReplayConfig;
+  
+  // Stale consumer detection and cleanup
+  staleConsumerDetection?: {
+    enabled: boolean;
+    heartbeatInterval: number;        // How often to send heartbeats (ms)
+    staleThreshold: number;          // How long before consumer is considered stale (ms)
+    cleanupInterval: number;         // How often to run cleanup (ms)
+    maxStaleConsumers: number;       // Max stale consumers before forced cleanup
+    enableHeartbeat: boolean;        // Enable heartbeat mechanism
+    enablePingPong: boolean;         // Enable ping-pong health check
+    cleanupStrategy: 'aggressive' | 'conservative' | 'manual';
+    preserveConsumerHistory: boolean; // Keep consumer history for debugging
+  };
 }
 
 interface StreamSubscription {
@@ -86,6 +99,269 @@ interface StreamSubscription {
     lastProcessedAt: Date;
     averageProcessingTime: number;
   };
+  // Stale consumer detection fields
+  lastHeartbeat: Date;
+  lastPingResponse: Date;
+  healthStatus: 'healthy' | 'degraded' | 'stale' | 'dead';
+  consecutiveFailures: number;
+  lastHealthCheck: Date;
+}
+
+interface ConsumerHealthInfo {
+  consumerId: string;
+  groupId: string;
+  streamName: string;
+  lastSeen: Date;
+  lastHeartbeat: Date;
+  lastPingResponse: Date;
+  healthStatus: 'healthy' | 'degraded' | 'stale' | 'dead';
+  consecutiveFailures: number;
+  messagesProcessed: number;
+  messagesFailed: number;
+  lastProcessedAt: Date;
+  isActive: boolean;
+  pendingMessages: number;
+}
+
+interface StaleConsumerMetrics {
+  totalConsumers: number;
+  healthyConsumers: number;
+  staleConsumers: number;
+  deadConsumers: number;
+  cleanupOperations: number;
+  lastCleanupAt: Date;
+  averageCleanupTime: number;
+  totalCleanupTime: number;
+}
+
+/**
+ * Detects stale consumers using multiple strategies
+ */
+class StaleConsumerDetector {
+  constructor(
+    private redis: Redis,
+    private config: RedisStreamsConfig['staleConsumerDetection']
+  ) {}
+
+  /**
+   * Detect stale consumers using Redis XINFO GROUPS command
+   */
+  async detectStaleConsumers(streamName: string, groupId: string): Promise<ConsumerHealthInfo[]> {
+    try {
+      const groupInfo = await this.redis.xinfo('GROUPS', streamName);
+      const consumers: ConsumerHealthInfo[] = [];
+      
+      // Handle case where groupInfo is not an array or is empty
+      if (!Array.isArray(groupInfo) || groupInfo.length === 0) {
+        return consumers;
+      }
+      
+      for (const group of groupInfo) {
+        // Ensure group has the expected structure
+        if (!Array.isArray(group) || group.length < 6) {
+          continue;
+        }
+        
+        if (group[1] === groupId) {
+          const consumerList = group[5]; // Consumers array
+          
+          // Ensure consumerList is an array
+          if (!Array.isArray(consumerList)) {
+            continue;
+          }
+          
+          for (const consumer of consumerList) {
+            // Ensure consumer has the expected structure
+            if (!Array.isArray(consumer) || consumer.length < 6) {
+              continue;
+            }
+            
+            const consumerId = consumer[1];
+            const pendingMessages = consumer[3] || 0;
+            const idleTime = consumer[5] || 0;
+            
+            const lastSeen = new Date(Date.now() - (idleTime * 1000));
+            const isStale = idleTime > (this.config?.staleThreshold || 30000) / 1000;
+            
+            consumers.push({
+              consumerId,
+              groupId,
+              streamName,
+              lastSeen,
+              lastHeartbeat: new Date(), // Will be updated by health monitor
+              lastPingResponse: new Date(), // Will be updated by health monitor
+              healthStatus: isStale ? 'stale' : 'healthy',
+              consecutiveFailures: 0,
+              messagesProcessed: 0,
+              messagesFailed: 0,
+              lastProcessedAt: new Date(),
+              isActive: !isStale,
+              pendingMessages
+            });
+          }
+        }
+      }
+      
+      return consumers;
+    } catch (error) {
+      console.warn(`Failed to detect stale consumers for stream ${streamName}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Check if a consumer is stale based on heartbeat
+   */
+  isConsumerStale(lastHeartbeat: Date, staleThreshold: number): boolean {
+    const now = new Date();
+    const timeSinceHeartbeat = now.getTime() - lastHeartbeat.getTime();
+    return timeSinceHeartbeat > staleThreshold;
+  }
+}
+
+/**
+ * Monitors consumer health using heartbeat and ping-pong mechanisms
+ */
+class ConsumerHealthMonitor {
+  constructor(
+    private redis: Redis,
+    private config: RedisStreamsConfig['staleConsumerDetection']
+  ) {}
+
+  /**
+   * Send heartbeat for a consumer
+   */
+  async sendHeartbeat(streamName: string, groupId: string, consumerId: string): Promise<void> {
+    try {
+      const heartbeatKey = `heartbeat:${streamName}:${groupId}:${consumerId}`;
+      await this.redis.set(heartbeatKey, Date.now().toString(), 'PX', this.config?.staleThreshold || 30000);
+    } catch (error) {
+      console.warn(`Failed to send heartbeat for consumer ${consumerId}:`, error);
+    }
+  }
+
+  /**
+   * Check heartbeat for a consumer
+   */
+  async checkHeartbeat(streamName: string, groupId: string, consumerId: string): Promise<boolean> {
+    try {
+      const heartbeatKey = `heartbeat:${streamName}:${groupId}:${consumerId}`;
+      const heartbeat = await this.redis.get(heartbeatKey);
+      return heartbeat !== null;
+    } catch (error) {
+      console.warn(`Failed to check heartbeat for consumer ${consumerId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Send ping to consumer and wait for pong response
+   */
+  async sendPing(streamName: string, groupId: string, consumerId: string): Promise<boolean> {
+    try {
+      const pingKey = `ping:${streamName}:${groupId}:${consumerId}`;
+      const pongKey = `pong:${streamName}:${groupId}:${consumerId}`;
+      
+      // Send ping
+      await this.redis.set(pingKey, Date.now().toString(), 'PX', 5000);
+      
+      // Wait for pong response (with timeout)
+      const startTime = Date.now();
+      const timeout = 3000; // 3 second timeout
+      
+      while (Date.now() - startTime < timeout) {
+        const pong = await this.redis.get(pongKey);
+        if (pong) {
+          await this.redis.del(pongKey);
+          return true;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      
+      return false;
+    } catch (error) {
+      console.warn(`Failed to send ping for consumer ${consumerId}:`, error);
+      return false;
+    }
+  }
+}
+
+/**
+ * Manages cleanup of stale consumers
+ */
+class ConsumerCleanupManager {
+  constructor(
+    private redis: Redis,
+    private config: RedisStreamsConfig['staleConsumerDetection']
+  ) {}
+
+  /**
+   * Clean up stale consumers from a consumer group
+   */
+  async cleanupStaleConsumers(streamName: string, groupId: string, staleConsumers: ConsumerHealthInfo[]): Promise<number> {
+    let cleanedCount = 0;
+    
+    for (const consumer of staleConsumers) {
+      try {
+        if (this.config?.cleanupStrategy === 'conservative' && consumer.pendingMessages > 0) {
+          console.log(`Skipping cleanup of consumer ${consumer.consumerId} due to pending messages`);
+          continue;
+        }
+        
+        // Remove consumer from group
+        await this.redis.xgroup('DELCONSUMER', streamName, groupId, consumer.consumerId);
+        
+        // Clean up heartbeat and ping keys
+        const heartbeatKey = `heartbeat:${streamName}:${groupId}:${consumer.consumerId}`;
+        const pingKey = `ping:${streamName}:${groupId}:${consumer.consumerId}`;
+        const pongKey = `pong:${streamName}:${groupId}:${consumer.consumerId}`;
+        
+        await this.redis.del(heartbeatKey, pingKey, pongKey);
+        
+        cleanedCount++;
+        console.log(`Cleaned up stale consumer ${consumer.consumerId} from group ${groupId}`);
+      } catch (error) {
+        console.warn(`Failed to cleanup consumer ${consumer.consumerId}:`, error);
+      }
+    }
+    
+    return cleanedCount;
+  }
+
+  /**
+   * Get cleanup statistics
+   */
+  async getCleanupStats(streamName: string, groupId: string): Promise<{ total: number; stale: number; pending: number }> {
+    try {
+      const groupInfo = await this.redis.xinfo('GROUPS', streamName);
+      
+      for (const group of groupInfo as any[]) {
+        if (group[1] === groupId) {
+          const consumers = group[5];
+          const pendingMessages = group[3];
+          
+          let staleCount = 0;
+          for (const consumer of consumers) {
+            const idleTime = consumer[5];
+            if (idleTime > (this.config?.staleThreshold || 30000) / 1000) {
+              staleCount++;
+            }
+          }
+          
+          return {
+            total: consumers.length,
+            stale: staleCount,
+            pending: pendingMessages
+          };
+        }
+      }
+      
+      return { total: 0, stale: 0, pending: 0 };
+    } catch (error) {
+      console.warn(`Failed to get cleanup stats for stream ${streamName}:`, error);
+      return { total: 0, stale: 0, pending: 0 };
+    }
+  }
 }
 
 export class EnhancedRedisStreamsTransport implements AdvancedTransport {
@@ -99,6 +375,15 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
   private config: RedisStreamsConfig;
   private subscriptions: Map<string, StreamSubscription> = new Map();
   private ensuredStreams: Set<string> = new Set(); // Track which streams have been ensured
+  private startTime: number;
+  
+  // Stale consumer detection and cleanup
+  private staleConsumerDetector?: StaleConsumerDetector;
+  private consumerHealthMonitor?: ConsumerHealthMonitor;
+  private consumerCleanupManager?: ConsumerCleanupManager;
+  private staleConsumerMetrics?: StaleConsumerMetrics;
+  private heartbeatInterval?: NodeJS.Timeout;
+  private cleanupInterval?: NodeJS.Timeout;
   private metrics: {
     messagesPublished: number;
     messagesReceived: number;
@@ -110,7 +395,6 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
     cpuUsage: number;
     lastUpdated: Date;
   };
-  private startTime: number;
 
   // Enterprise feature managers
   private orderingManager?: MessageOrderingManager;
@@ -138,6 +422,17 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
       pipelineSize: 100,
       skipStreamGroupCheck: false,
       enableMetrics: true,
+      staleConsumerDetection: {
+        enabled: false,
+        heartbeatInterval: 30000,        // 30 seconds
+        staleThreshold: 60000,           // 1 minute
+        cleanupInterval: 120000,         // 2 minutes
+        maxStaleConsumers: 100,
+        enableHeartbeat: true,
+        enablePingPong: true,
+        cleanupStrategy: 'conservative',
+        preserveConsumerHistory: true
+      },
       connectionPool: {
         enabled: false,
         size: 5,
@@ -167,6 +462,9 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
     // Initialize enterprise feature managers
     this.initializeEnterpriseFeatures();
     
+    // Initialize stale consumer detection and cleanup
+    this.initializeStaleConsumerDetection();
+    
     // Set capabilities based on configuration
     this.capabilities = this.buildCapabilities();
   }
@@ -195,6 +493,31 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
     // Initialize replay manager
     if (this.config.replay?.enabled) {
       this.replayManager = new MessageReplayManager(this.redis, this.config.replay);
+    }
+  }
+
+  /**
+   * Initialize stale consumer detection and cleanup
+   */
+  private initializeStaleConsumerDetection(): void {
+    if (this.config.staleConsumerDetection?.enabled) {
+      this.staleConsumerDetector = new StaleConsumerDetector(this.redis, this.config.staleConsumerDetection);
+      this.consumerHealthMonitor = new ConsumerHealthMonitor(this.redis, this.config.staleConsumerDetection);
+      this.consumerCleanupManager = new ConsumerCleanupManager(this.redis, this.config.staleConsumerDetection);
+      this.staleConsumerMetrics = {
+        totalConsumers: 0,
+        healthyConsumers: 0,
+        staleConsumers: 0,
+        deadConsumers: 0,
+        cleanupOperations: 0,
+        lastCleanupAt: new Date(),
+        averageCleanupTime: 0,
+        totalCleanupTime: 0
+      };
+
+      // Start heartbeat and cleanup intervals
+      this.startHeartbeatInterval();
+      this.startCleanupInterval();
     }
   }
 
@@ -344,13 +667,82 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
     }
   }
   
-  async disconnect(): Promise<void> {
-    if (!this.connected) return;
+  /**
+   * Get stale consumer metrics
+   */
+  async getStaleConsumerMetrics(): Promise<StaleConsumerMetrics | undefined> {
+    return this.staleConsumerMetrics;
+  }
+
+  /**
+   * Manually trigger stale consumer cleanup
+   */
+  async triggerStaleConsumerCleanup(): Promise<void> {
+    if (this.config.staleConsumerDetection?.enabled) {
+      await this.performStaleConsumerCleanup();
+    }
+  }
+
+  /**
+   * Get consumer health information for a specific stream
+   */
+  async getConsumerHealth(streamName: string, groupId: string): Promise<ConsumerHealthInfo[]> {
+    if (!this.config.staleConsumerDetection?.enabled || !this.staleConsumerDetector) {
+      return [];
+    }
+    return await this.staleConsumerDetector.detectStaleConsumers(streamName, groupId);
+  }
+
+  /**
+   * Manually remove a specific consumer from a group
+   */
+  async removeConsumer(streamName: string, groupId: string, consumerId: string): Promise<boolean> {
+    if (!this.config.staleConsumerDetection?.enabled || !this.consumerCleanupManager) {
+      return false;
+    }
     
+    try {
+      const consumers = await this.staleConsumerDetector?.detectStaleConsumers(streamName, groupId);
+      if (consumers) {
+        const targetConsumer = consumers.find(c => c.consumerId === consumerId);
+        if (targetConsumer) {
+          const cleanedCount = await this.consumerCleanupManager.cleanupStaleConsumers(streamName, groupId, [targetConsumer]);
+          return cleanedCount > 0;
+        }
+      }
+      return false;
+    } catch (error) {
+      console.warn(`Failed to remove consumer ${consumerId}:`, error);
+      return false;
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    // Stop all consumer loops
     for (const subscription of this.subscriptions.values()) {
       subscription.running = false;
     }
-    // Don't disconnect the Redis instance, just mark as disconnected
+    
+    // Clear intervals
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = undefined;
+    }
+    
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = undefined;
+    }
+    
+    // Close Redis connection if quit method exists
+    if (this.redis && typeof this.redis.quit === 'function') {
+      try {
+        await this.redis.quit();
+      } catch (error) {
+        console.warn('Failed to quit Redis connection:', error);
+      }
+    }
+    
     this.connected = false;
   }
   
@@ -514,7 +906,13 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
         messagesFailed: 0,
         lastProcessedAt: new Date(),
         averageProcessingTime: 0
-      }
+      },
+      // Initialize stale consumer detection fields
+      lastHeartbeat: new Date(),
+      lastPingResponse: new Date(),
+      healthStatus: 'healthy',
+      consecutiveFailures: 0,
+      lastHealthCheck: new Date()
     };
     
     this.subscriptions.set(streamName, subscription);
@@ -591,14 +989,28 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
       replay: this.replayManager ? 'healthy' : 'disabled'
     };
     
-    // Log enterprise feature health for monitoring
-    console.log('Enterprise features health:', enterpriseHealth);
+    // Check stale consumer detection health
+    const staleConsumerHealth = this.config.staleConsumerDetection?.enabled ? {
+      enabled: true,
+      heartbeat: this.heartbeatInterval ? 'active' : 'inactive',
+      cleanup: this.cleanupInterval ? 'active' : 'inactive',
+      metrics: this.staleConsumerMetrics || {
+        totalConsumers: 0,
+        healthyConsumers: 0,
+        staleConsumers: 0,
+        deadConsumers: 0,
+        cleanupOperations: 0,
+        lastCleanupAt: new Date(),
+        averageCleanupTime: 0,
+        totalCleanupTime: 0
+      }
+    } : { enabled: false };
     
     return {
       connected,
       healthy: connected && this.redis.status === 'ready' && Object.values(enterpriseHealth).every(h => h === 'healthy' || h === 'disabled'),
       uptime,
-      version: '2.0.0'
+      version: '3.2.0'
     };
   }
   
@@ -737,10 +1149,45 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
     }
   }
   
+  /**
+   * Respond to ping requests for health monitoring
+   */
+  private async respondToPing(streamName: string, groupId: string, consumerId: string): Promise<void> {
+    if (!this.config.staleConsumerDetection?.enabled || !this.config.staleConsumerDetection.enablePingPong) {
+      return;
+    }
+
+    try {
+      const pingKey = `ping:${streamName}:${groupId}:${consumerId}`;
+      const pongKey = `pong:${streamName}:${groupId}:${consumerId}`;
+      
+      // Check if we have a ping request
+      const ping = await this.redis.get(pingKey);
+      if (ping) {
+        // Respond with pong
+        await this.redis.set(pongKey, Date.now().toString(), 'PX', 5000);
+        await this.redis.del(pingKey);
+        
+        // Update subscription health
+        const subscription = this.subscriptions.get(streamName);
+        if (subscription) {
+          subscription.lastPingResponse = new Date();
+          subscription.healthStatus = 'healthy';
+          subscription.consecutiveFailures = 0;
+        }
+      }
+    } catch (error) {
+      console.warn(`Failed to respond to ping for consumer ${consumerId}:`, error);
+    }
+  }
+
   private async startConsumer(subscription: StreamSubscription): Promise<void> {
     const consume = async () => {
       while (subscription.running) {
         try {
+          // Check for ping requests first
+          await this.respondToPing(subscription.streamName, subscription.groupId, subscription.consumerId);
+          
           const messages = await this.redis.xreadgroup(
             'GROUP', subscription.groupId, subscription.consumerId,
             'COUNT', this.config.batchSize!,
@@ -758,6 +1205,16 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
           } 
         } catch (error) {
           console.error(`Error consuming from stream ${subscription.streamName}:`, error);
+          
+          // Update health status
+          subscription.consecutiveFailures++;
+          if (subscription.consecutiveFailures > 3) {
+            subscription.healthStatus = 'degraded';
+          }
+          if (subscription.consecutiveFailures > 10) {
+            subscription.healthStatus = 'stale';
+          }
+          
           await this.sleep(this.config.retryDelay!);
         }
       }
@@ -953,6 +1410,126 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
   }
 
   /**
+   * Start heartbeat interval for stale consumer detection
+   */
+  private startHeartbeatInterval(): void {
+    if (!this.config.staleConsumerDetection?.enabled || !this.config.staleConsumerDetection.enableHeartbeat) {
+      return;
+    }
+
+    const interval = this.config.staleConsumerDetection.heartbeatInterval || 30000; // Default to 30s
+    this.heartbeatInterval = setInterval(() => {
+      this.checkAndSendHeartbeats();
+    }, interval);
+    console.log(`Stale consumer heartbeat interval started (${interval}ms)`);
+  }
+
+  /**
+   * Start cleanup interval for stale consumer detection
+   */
+  private startCleanupInterval(): void {
+    if (!this.config.staleConsumerDetection?.enabled || !this.config.staleConsumerDetection.cleanupInterval) {
+      return;
+    }
+
+    const interval = this.config.staleConsumerDetection.cleanupInterval || 60000; // Default to 60s
+    this.cleanupInterval = setInterval(() => {
+      this.performStaleConsumerCleanup();
+    }, interval);
+    console.log(`Stale consumer cleanup interval started (${interval}ms)`);
+  }
+
+  /**
+   * Check and send heartbeats for all active consumers
+   */
+  private async checkAndSendHeartbeats(): Promise<void> {
+    if (!this.config.staleConsumerDetection?.enabled || !this.config.staleConsumerDetection.enableHeartbeat) {
+      return;
+    }
+
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.running) {
+        await this.consumerHealthMonitor?.sendHeartbeat(subscription.streamName, subscription.groupId, subscription.consumerId);
+      }
+    }
+  }
+
+  /**
+   * Perform cleanup of stale consumers
+   */
+  private async performStaleConsumerCleanup(): Promise<void> {
+    if (!this.config.staleConsumerDetection?.enabled || !this.config.staleConsumerDetection.cleanupInterval) {
+      return;
+    }
+
+    const maxStaleConsumers = this.config.staleConsumerDetection.maxStaleConsumers || 100;
+    const staleThreshold = this.config.staleConsumerDetection.staleThreshold || 30000; // 30s
+    const cleanupStrategy = this.config.staleConsumerDetection.cleanupStrategy || 'aggressive';
+
+    let totalConsumers = 0;
+    let healthyConsumers = 0;
+    let staleConsumers = 0;
+    let deadConsumers = 0;
+    let cleanupOperations = 0;
+    let totalCleanupTime = 0;
+
+    // Only proceed if we have active subscriptions
+    if (this.subscriptions.size === 0) {
+      return;
+    }
+
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.running) {
+        const streamName = subscription.streamName;
+        const groupId = subscription.groupId;
+        const consumerId = subscription.consumerId;
+
+        try {
+          const consumers = await this.staleConsumerDetector?.detectStaleConsumers(streamName, groupId);
+          if (consumers) {
+            totalConsumers += consumers.length;
+            consumers.forEach(consumer => {
+              if (consumer.healthStatus === 'healthy') {
+                healthyConsumers++;
+              } else if (consumer.healthStatus === 'stale') {
+                staleConsumers++;
+              } else if (consumer.healthStatus === 'dead') {
+                deadConsumers++;
+              }
+            });
+
+            if (consumers.length > 0) {
+              const startTime = Date.now();
+              const cleanedCount = await this.consumerCleanupManager?.cleanupStaleConsumers(streamName, groupId, consumers);
+              cleanupOperations++;
+              totalCleanupTime += Date.now() - startTime;
+              console.log(`Cleaned up ${cleanedCount} stale consumers from group ${groupId} on stream ${streamName}`);
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to perform stale consumer cleanup for stream ${streamName}:`, error);
+        }
+      }
+    }
+
+    // Only update metrics if we had operations
+    if (cleanupOperations > 0) {
+      this.staleConsumerMetrics = {
+        totalConsumers,
+        healthyConsumers,
+        staleConsumers,
+        deadConsumers,
+        cleanupOperations,
+        lastCleanupAt: new Date(),
+        averageCleanupTime: totalCleanupTime / cleanupOperations,
+        totalCleanupTime
+      };
+
+      console.log(`Stale consumer cleanup complete. Total Consumers: ${totalConsumers}, Healthy: ${healthyConsumers}, Stale: ${staleConsumers}, Dead: ${deadConsumers}, Operations: ${cleanupOperations}, Avg Cleanup Time: ${this.staleConsumerMetrics.averageCleanupTime}ms`);
+    }
+  }
+
+  /**
    * Get enterprise feature managers
    */
   getOrderingManager(): MessageOrderingManager | undefined {
@@ -969,5 +1546,56 @@ export class EnhancedRedisStreamsTransport implements AdvancedTransport {
 
   getReplayManager(): MessageReplayManager | undefined {
     return this.replayManager;
+  }
+
+  /**
+   * Get extended status including stale consumer detection information
+   */
+  async getExtendedStatus(): Promise<{
+    connected: boolean;
+    healthy: boolean;
+    uptime: number;
+    version: string;
+    subscriptions: number;
+    enterpriseFeatures: any;
+    staleConsumerDetection: any;
+  }> {
+    const connected = this.connected;
+    const uptime = Date.now() - this.startTime;
+    
+    // Check enterprise feature health
+    const enterpriseHealth = {
+      ordering: this.orderingManager ? 'healthy' : 'disabled',
+      partitioning: this.partitioningManager ? 'healthy' : 'disabled',
+      schema: this.schemaManager ? 'healthy' : 'disabled',
+      replay: this.replayManager ? 'healthy' : 'disabled'
+    };
+    
+    // Check stale consumer detection health
+    const staleConsumerHealth = this.config.staleConsumerDetection?.enabled ? {
+      enabled: true,
+      heartbeat: this.heartbeatInterval ? 'active' : 'inactive',
+      cleanup: this.cleanupInterval ? 'active' : 'inactive',
+      metrics: this.staleConsumerMetrics || {
+        totalConsumers: 0,
+        healthyConsumers: 0,
+        staleConsumers: 0,
+        deadConsumers: 0,
+        cleanupOperations: 0,
+        lastCleanupAt: new Date(),
+        averageCleanupTime: 0,
+        totalCleanupTime: 0
+      }
+    } : { enabled: false };
+    
+    return {
+      connected,
+      healthy: connected && this.redis.status === 'ready' && Object.values(enterpriseHealth).every(h => h === 'healthy' || h === 'disabled'),
+      uptime,
+      version: '3.2.0',
+      subscriptions: this.subscriptions.size,
+      enterpriseFeatures: enterpriseHealth,
+      staleConsumerDetection: staleConsumerHealth
+    };
   }
 }
