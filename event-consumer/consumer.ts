@@ -106,8 +106,8 @@ export class EventConsumer {
     // Wrap the handler to add statistics tracking and validation
     const wrappedHandler = this.wrapHandler(eventType, handler, transportName);
     
-    // Subscribe to the transport
-    await transport.subscribe(resolvedTopic, wrappedHandler, finalOptions);
+    // Subscribe to the transport - patterns are auto-detected
+    await transport.subscribe(resolvedTopic, wrappedHandler, finalOptions, eventType);
     
     // Record subscription
     const subscriptionInfo: SubscriptionInfo = {

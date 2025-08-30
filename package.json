@@ -1,6 +1,6 @@
 {
   "name": "@logistically/events",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "description": "A production-ready event-driven architecture library with Redis Streams, comprehensive batching, reliable consumption, and enterprise-grade features.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,7 +10,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:integration": "jest --config jest.integration.config.js",
-    "test:unit": "jest --testPathIgnorePatterns='redis-integration-tests.spec.ts|redis-publishing.spec.ts|redis-basic-test.spec.ts'",
+    "test:unit": "jest --testPathIgnorePatterns='redis-integration-tests.spec.ts|redis-publishing.spec.ts|redis-basic-test.spec.ts|event-type-filtering-integration.spec.ts'",
     "test:redis": "jest --testPathPattern='redis-integration-tests.spec.ts|redis-publishing.spec.ts|redis-basic-test.spec.ts'",
     "example:origin-based": "ts-node examples/basic/origin-based-system.ts"
   },

@@ -116,9 +116,10 @@ describe('EventConsumer', () => {
         'test-topic',
         expect.any(Function),
         expect.objectContaining({
-          groupId: 'test-group',
           consumerId: 'test-consumer',
-        })
+          groupId: 'test-group'
+        }),
+        'user.created' // eventType is now passed as 4th parameter
       );
     });
 

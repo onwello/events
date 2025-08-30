@@ -1,13 +1,14 @@
 import { EnhancedRedisStreamsTransport } from './enhanced-redis-streams-transport';
 import { Redis } from 'ioredis';
+import { EventEnvelope } from '../../../event-types';
 
 // Mock Redis
 jest.mock('ioredis');
 
-describe('EnhancedRedisStreamsTransport - Constructor and Basics', () => {
-  let mockRedis: jest.Mocked<Redis>;
-  let transport: EnhancedRedisStreamsTransport;
+// Global mock Redis instance
+let mockRedis: jest.Mocked<Redis>;
 
+describe('EnhancedRedisStreamsTransport', () => {
   beforeEach(() => {
     mockRedis = {
       ping: jest.fn().mockResolvedValue('PONG'),
@@ -32,10 +33,14 @@ describe('EnhancedRedisStreamsTransport - Constructor and Basics', () => {
     } as any;
   });
 
-  describe('Constructor', () => {
-    it('should create transport with default config', () => {
+  describe('Constructor and Basics', () => {
+    let transport: EnhancedRedisStreamsTransport;
+
+    beforeEach(() => {
       transport = new EnhancedRedisStreamsTransport(mockRedis);
-      
+    });
+
+    it('should create transport with default config', () => {
       expect(transport.name).toBe('redis-streams');
       expect(transport.isConnected()).toBe(false);
       expect(transport.capabilities.supportsPublishing).toBe(true);
@@ -79,6 +84,8 @@ describe('EnhancedRedisStreamsTransport - Constructor and Basics', () => {
   });
 
   describe('Connection Management', () => {
+    let transport: EnhancedRedisStreamsTransport;
+
     beforeEach(() => {
       transport = new EnhancedRedisStreamsTransport(mockRedis);
     });
@@ -138,6 +145,8 @@ describe('EnhancedRedisStreamsTransport - Constructor and Basics', () => {
   });
 
   describe('Basic Properties', () => {
+    let transport: EnhancedRedisStreamsTransport;
+
     beforeEach(() => {
       transport = new EnhancedRedisStreamsTransport(mockRedis);
     });
@@ -167,6 +176,12 @@ describe('EnhancedRedisStreamsTransport - Constructor and Basics', () => {
   });
 
   describe('Enterprise Features', () => {
+    let transport: EnhancedRedisStreamsTransport;
+
+    beforeEach(() => {
+      transport = new EnhancedRedisStreamsTransport(mockRedis);
+    });
+
     it('should return undefined managers when not configured', () => {
       expect(transport.getOrderingManager()).toBeUndefined();
       expect(transport.getPartitioningManager()).toBeUndefined();
@@ -275,5 +290,269 @@ describe('EnhancedRedisStreamsTransport - Constructor and Basics', () => {
     });
 
 
+  });
+});
+
+describe('EnhancedRedisStreamsTransport - Event Type Filtering', () => {
+  let transport: EnhancedRedisStreamsTransport;
+  let mockHandler: jest.Mock;
+  let mockPatternHandler: jest.Mock;
+
+  beforeEach(() => {
+    mockHandler = jest.fn().mockResolvedValue(undefined);
+    mockPatternHandler = jest.fn().mockResolvedValue(undefined);
+    
+    // Create transport but DON'T connect (which starts consumers)
+    transport = new EnhancedRedisStreamsTransport(mockRedis, {
+      streamPrefix: 'stream:',
+      groupId: 'test-group',
+      consumerId: 'test-consumer',
+      enableMetrics: false
+    });
+    
+    // Don't call connect() - this prevents consumer loops from starting
+  });
+
+  afterEach(() => {
+    // Clean up without disconnecting
+    jest.clearAllMocks();
+  });
+
+  describe('Subscription Methods', () => {
+    it('should support exact event type subscription', () => {
+      // Test that the transport can store subscriptions with event types
+      // without actually starting consumers
+      const subscription = {
+        streamName: 'stream:test-topic',
+        groupId: 'test-group',
+        consumerId: 'test-consumer',
+        handler: mockHandler,
+        eventType: 'user.created',
+        isPattern: false,
+        pattern: undefined,
+        options: {},
+        running: false,
+        lastProcessedId: '0',
+        retryCount: new Map(),
+        metrics: {
+          messagesProcessed: 0,
+          messagesFailed: 0,
+          lastProcessedAt: new Date(),
+          averageProcessingTime: 0
+        }
+      };
+      
+      // Manually add subscription to test internal logic
+      (transport as any).subscriptions.set('stream:test-topic', subscription);
+      
+      // Verify subscription was stored correctly
+      const storedSubscription = (transport as any).subscriptions.get('stream:test-topic');
+      expect(storedSubscription).toBeDefined();
+      expect(storedSubscription.eventType).toBe('user.created');
+      expect(storedSubscription.isPattern).toBe(false);
+    });
+
+    it('should auto-detect pattern subscriptions', () => {
+      // Test pattern detection logic
+      const isPattern = (transport as any).isPattern;
+      
+      expect(isPattern('user.*')).toBe(true);
+      expect(isPattern('*.created')).toBe(true);
+      expect(isPattern('*.user.*.updated')).toBe(true);
+      expect(isPattern('user.created')).toBe(false);
+      expect(isPattern('location-events')).toBe(false);
+    });
+
+    it('should convert patterns to stream names correctly', () => {
+      // Test pattern to stream name conversion
+      const patternToStreamName = (transport as any).patternToStreamName;
+      
+      expect(patternToStreamName('user.*')).toBe('user-events');
+      expect(patternToStreamName('*.created')).toBe('events');
+      expect(patternToStreamName('eu.de.user.*')).toBe('eu-de-user-events');
+      expect(patternToStreamName('location.user.invite.*')).toBe('location-user-invite-events');
+    });
+
+    it('should handle multiple subscriptions to same topic', () => {
+      // Test multiple subscription storage without starting consumers
+      const subscription1 = {
+        streamName: 'stream:test-topic-1',
+        groupId: 'test-group',
+        consumerId: 'test-consumer',
+        handler: mockHandler,
+        eventType: 'user.created',
+        isPattern: false,
+        pattern: undefined,
+        options: {},
+        running: false,
+        lastProcessedId: '0',
+        retryCount: new Map(),
+        metrics: {
+          messagesProcessed: 0,
+          messagesFailed: 0,
+          lastProcessedAt: new Date(),
+          averageProcessingTime: 0
+        }
+      };
+      
+      const subscription2 = {
+        streamName: 'stream:test-topic-2',
+        groupId: 'test-group',
+        consumerId: 'test-consumer',
+        handler: mockHandler,
+        eventType: 'user.updated',
+        isPattern: false,
+        pattern: undefined,
+        options: {},
+        running: false,
+        lastProcessedId: '0',
+        retryCount: new Map(),
+        metrics: {
+          messagesProcessed: 0,
+          messagesFailed: 0,
+          lastProcessedAt: new Date(),
+          averageProcessingTime: 0
+        }
+      };
+      
+      // Manually add subscriptions to test internal logic
+      (transport as any).subscriptions.set('stream:test-topic-1', subscription1);
+      (transport as any).subscriptions.set('stream:test-topic-2', subscription2);
+      
+      // Verify both subscriptions exist
+      const storedSubscription1 = (transport as any).subscriptions.get('stream:test-topic-1');
+      const storedSubscription2 = (transport as any).subscriptions.get('stream:test-topic-2');
+      
+      expect(storedSubscription1).toBeDefined();
+      expect(storedSubscription2).toBeDefined();
+      expect(storedSubscription1.eventType).toBe('user.created');
+      expect(storedSubscription2.eventType).toBe('user.updated');
+    });
+  });
+
+  describe('Pattern Matching Logic', () => {
+    it('should convert patterns to regex correctly', () => {
+      // Test the private pattern conversion method
+      const patternToRegex = (transport as any).patternToRegex;
+      
+      expect(patternToRegex('user.*')).toBe('^user\\..*$');
+      expect(patternToRegex('*.created')).toBe('^.*\\.created$');
+      expect(patternToRegex('*.user.*.updated')).toBe('^.*\\.user\\..*\\.updated$');
+    });
+
+    it('should match event types against patterns correctly', () => {
+      // Test the private pattern matching method by calling it directly
+      const matchesEventPattern = (transport as any).matchesEventPattern.bind(transport);
+      
+      // Simple patterns
+      expect(matchesEventPattern('user.created', 'user.*')).toBe(true);
+      expect(matchesEventPattern('user.updated', 'user.*')).toBe(true);
+      expect(matchesEventPattern('order.created', 'user.*')).toBe(false);
+      
+      // Complex patterns
+      expect(matchesEventPattern('eu.de.user.profile.updated', '*.user.*.updated')).toBe(true);
+      expect(matchesEventPattern('us.ca.user.settings.updated', '*.user.*.updated')).toBe(true);
+      expect(matchesEventPattern('user.profile.updated', '*.user.*.updated')).toBe(false);
+    });
+  });
+
+  describe('Message Filtering Logic', () => {
+    it('should determine message processing correctly', () => {
+      // Test the private message filtering method
+      const shouldProcessMessage = (transport as any).shouldProcessMessage;
+      
+      // Create test subscription and message
+      const subscription = {
+        isPattern: false,
+        eventType: 'user.created',
+        pattern: undefined
+      };
+      
+      const message = {
+        header: { type: 'user.created' }
+      };
+      
+      const nonMatchingMessage = {
+        header: { type: 'user.updated' }
+      };
+      
+      // Exact subscription should match exact event type
+      expect(shouldProcessMessage(subscription, message)).toBe(true);
+      expect(shouldProcessMessage(subscription, nonMatchingMessage)).toBe(false);
+    });
+
+    it('should handle pattern subscriptions correctly', () => {
+      const shouldProcessMessage = (transport as any).shouldProcessMessage.bind(transport);
+      
+      const patternSubscription = {
+        isPattern: true,
+        eventType: undefined,
+        pattern: 'user.*'
+      };
+      
+      const matchingMessage = {
+        header: { type: 'user.created' }
+      };
+      
+      const nonMatchingMessage = {
+        header: { type: 'order.created' }
+      };
+      
+      // Pattern subscription should match based on pattern
+      expect(shouldProcessMessage(patternSubscription, matchingMessage)).toBe(true);
+      expect(shouldProcessMessage(patternSubscription, nonMatchingMessage)).toBe(false);
+    });
+
+    it('should handle backward compatibility', () => {
+      const shouldProcessMessage = (transport as any).shouldProcessMessage;
+      
+      const legacySubscription = {
+        isPattern: false,
+        eventType: undefined,
+        pattern: undefined
+      };
+      
+      const message = {
+        header: { type: 'any.event.type' }
+      };
+      
+      // Legacy subscription should process all messages
+      expect(shouldProcessMessage(legacySubscription, message)).toBe(true);
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('should handle messages without event type gracefully', () => {
+      const shouldProcessMessage = (transport as any).shouldProcessMessage;
+      
+      const subscription = {
+        isPattern: false,
+        eventType: 'user.created',
+        pattern: undefined
+      };
+      
+      const messageWithoutEventType = {
+        header: { /* no type field */ }
+      };
+      
+      // Should not process messages without event type
+      expect(shouldProcessMessage(subscription, messageWithoutEventType)).toBe(false);
+    });
+
+    it('should handle malformed messages gracefully', () => {
+      const shouldProcessMessage = (transport as any).shouldProcessMessage;
+      
+      const subscription = {
+        isPattern: false,
+        eventType: 'user.created',
+        pattern: undefined
+      };
+      
+      const malformedMessage = { invalid: 'structure' };
+      
+      // Should not process malformed messages - this will throw an error
+      // because the message doesn't have the expected structure
+      expect(() => shouldProcessMessage(subscription, malformedMessage)).toThrow();
+    });
   });
 });

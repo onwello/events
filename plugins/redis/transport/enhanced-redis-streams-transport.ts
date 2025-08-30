@@ -9,7 +9,8 @@ import {
   EventEnvelope,
   TransportStatus,
   TransportMetrics,
-  BatchOptions
+  BatchOptions,
+  AdvancedTransport
 } from '../../../event-transport/transport.interface';
 import { createEventEnvelope } from '../../../event-types';
 import { MessageOrderingManager, OrderingConfig } from './message-ordering';
@@ -72,6 +73,9 @@ interface StreamSubscription {
   groupId: string;
   consumerId: string;
   handler: MessageHandler;
+  eventType?: string;        // Event type for exact subscriptions
+  isPattern?: boolean;       // Whether this is a pattern subscription
+  pattern?: string;          // Pattern for pattern subscriptions
   options?: SubscribeOptions;
   running: boolean;
   lastProcessedId: string;
@@ -84,7 +88,7 @@ interface StreamSubscription {
   };
 }
 
-export class EnhancedRedisStreamsTransport implements Transport {
+export class EnhancedRedisStreamsTransport implements AdvancedTransport {
   readonly name = 'redis-streams';
   readonly capabilities: TransportCapabilities;
   
@@ -464,12 +468,26 @@ export class EnhancedRedisStreamsTransport implements Transport {
     }
   }
   
-  async subscribe(topic: string, handler: MessageHandler, options?: SubscribeOptions): Promise<void> {
+  async subscribe(topic: string, handler: MessageHandler, options?: SubscribeOptions, eventType?: string): Promise<void> {
     if (!this.connected) {
       throw new Error('Transport not connected');
     }
     
-    const streamName = `${this.config.streamPrefix}${topic}`;
+    // Auto-detect if this is a pattern subscription
+    const isPattern = this.isPattern(topic);
+    const actualEventType = isPattern ? undefined : eventType;
+    const pattern = isPattern ? topic : undefined;
+    
+    // For pattern subscriptions, determine stream name based on pattern
+    let streamName: string;
+    if (isPattern) {
+      // Convert pattern to stream name (e.g., 'user.*' -> 'user-events')
+      streamName = `${this.config.streamPrefix}${this.patternToStreamName(topic)}`;
+    } else {
+      // Use topic as-is for exact subscriptions
+      streamName = `${this.config.streamPrefix}${topic}`;
+    }
+    
     const groupId = options?.groupId || this.config.groupId!;
     const consumerId = options?.consumerId || this.config.consumerId!;
     
@@ -484,6 +502,9 @@ export class EnhancedRedisStreamsTransport implements Transport {
       groupId,
       consumerId,
       handler,
+      eventType: actualEventType,    // For exact subscriptions
+      isPattern,                      // Auto-detected
+      pattern,                        // For pattern subscriptions
       options,
       running: true,
       lastProcessedId: '0',
@@ -500,14 +521,62 @@ export class EnhancedRedisStreamsTransport implements Transport {
     this.startConsumer(subscription);
   }
   
-  async unsubscribe(topic: string): Promise<void> {
-    const streamName = `${this.config.streamPrefix}${topic}`;
-    const subscription = this.subscriptions.get(streamName);
+  /**
+   * Detect if a topic string contains pattern wildcards
+   */
+  private isPattern(topic: string): boolean {
+    return topic.includes('*');
+  }
+  
+  /**
+   * Convert a pattern to a stream name for Redis
+   * This groups related patterns into logical streams
+   */
+  private patternToStreamName(pattern: string): string {
+    // Extract the base namespace from the pattern
+    // e.g., 'user.*' -> 'user-events', '*.created' -> 'events', 'eu.de.user.*' -> 'eu-de-user-events'
+    const segments = pattern.split('.');
     
-    if (subscription) {
-      subscription.running = false;
-      this.subscriptions.delete(streamName);
+    if (segments.length === 1) {
+      // Single segment like 'user' -> 'user-events'
+      return `${segments[0]}-events`;
+    } else if (segments[0] === '*') {
+      // Pattern starts with wildcard like '*.created' -> 'events'
+      return 'events';
+    } else {
+      // Multi-segment pattern like 'eu.de.user.*' -> 'eu-de-user-events'
+      const baseSegments = segments.filter(segment => segment !== '*');
+      return `${baseSegments.join('-')}-events`;
     }
+  }
+  
+  async unsubscribe(topic: string): Promise<void> {
+    // Check if this is a pattern subscription
+    const isPattern = this.isPattern(topic);
+    
+    if (isPattern) {
+      // For pattern subscriptions, find by pattern
+      for (const [streamName, subscription] of this.subscriptions.entries()) {
+        if (subscription.isPattern && subscription.pattern === topic) {
+          subscription.running = false;
+          this.subscriptions.delete(streamName);
+          return;
+        }
+      }
+    } else {
+      // For exact subscriptions, find by stream name
+      const streamName = `${this.config.streamPrefix}${topic}`;
+      const subscription = this.subscriptions.get(streamName);
+      if (subscription) {
+        subscription.running = false;
+        this.subscriptions.delete(streamName);
+      }
+    }
+  }
+  
+  async unsubscribePattern(pattern: string): Promise<void> {
+    // This is now just an alias for unsubscribe since patterns are auto-detected
+    await this.unsubscribe(pattern);
   }
   
   async getStatus(): Promise<TransportStatus> {
@@ -725,7 +794,19 @@ export class EnhancedRedisStreamsTransport implements Transport {
         timestamp: Date.now()
       };
       
+      // ✅ IMPLEMENT EVENT TYPE FILTERING
+      const shouldProcessMessage = this.shouldProcessMessage(subscription, envelope);
+      
+      if (!shouldProcessMessage) {
+        // Skip this message - it doesn't match the subscription criteria
+        // Don't ack - let other handlers process it
+        return;
+      }
+      
+      // Call handler only if message matches subscription criteria
       await subscription.handler(envelope, metadata);
+      
+      // Only ack if we actually processed the message
       await this.ackMessage(subscription.streamName, subscription.groupId, id);
       
       const processingTime = Date.now() - startTime;
@@ -800,6 +881,57 @@ export class EnhancedRedisStreamsTransport implements Transport {
     const topic = streamName.replace(this.config.streamPrefix!, '');
     const regex = new RegExp(pattern.replace(/\*/g, '.*').replace(/\./g, '\\.'));
     return regex.test(topic);
+  }
+  
+  /**
+   * Determine if a message should be processed by this subscription
+   * based on event type and pattern matching
+   */
+  private shouldProcessMessage(subscription: StreamSubscription, envelope: EventEnvelope): boolean {
+    const messageEventType = envelope.header.type;
+    
+    if (!messageEventType) {
+      // If message has no event type, skip it
+      return false;
+    }
+    
+    if (subscription.isPattern && subscription.pattern) {
+      // Pattern subscription - check if message matches pattern
+      return this.matchesEventPattern(messageEventType, subscription.pattern);
+    } else if (subscription.eventType) {
+      // Exact subscription - check if event types match exactly
+      return messageEventType === subscription.eventType;
+    }
+    
+    // If no filtering criteria specified, process all messages
+    // This maintains backward compatibility
+    return true;
+  }
+  
+  /**
+   * Check if an event type matches a pattern
+   * Supports wildcard patterns like 'user.*', '*.created', 'user.*.updated'
+   */
+  private matchesEventPattern(eventType: string, pattern: string): boolean {
+    // Convert pattern to regex
+    const regexPattern = this.patternToRegex(pattern);
+    const regex = new RegExp(regexPattern);
+    
+    return regex.test(eventType);
+  }
+  
+  /**
+   * Convert a pattern string to a regex string
+   * Supports wildcards: * matches any segment, .* matches any characters within a segment
+   */
+  private patternToRegex(pattern: string): string {
+    // Escape special regex characters except * and .
+    let regexPattern = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')  // Escape regex special chars
+      .replace(/\*/g, '.*');                   // Convert * to .*
+    
+    // Ensure the pattern matches the entire string
+    return `^${regexPattern}$`;
   }
   
   

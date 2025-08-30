@@ -126,7 +126,7 @@ export interface Transport {
   publish(topic: string, message: any, options?: PublishOptions): Promise<void>;
   
   // Subscription - all transports must support basic subscription
-  subscribe(topic: string, handler: MessageHandler, options?: SubscribeOptions): Promise<void>;
+  subscribe(topic: string, handler: MessageHandler, options?: SubscribeOptions, eventType?: string): Promise<void>;
   unsubscribe(topic: string): Promise<void>;
   
   // Lifecycle
@@ -139,9 +139,9 @@ export interface Transport {
 
 // Extended transport interface for advanced features
 export interface AdvancedTransport extends Transport {
-  // Pattern-based routing (optional)
-  subscribePattern?(pattern: string, handler: PatternHandler, options?: SubscribeOptions): Promise<void>;
-  unsubscribePattern?(pattern: string): Promise<void>;
+  // Pattern-based routing is now handled by the main subscribe method
+  // No separate subscribePattern method needed
+  unsubscribePattern(pattern: string): Promise<void>;
   
   // Batching (optional) - now with consistent signature accepting any data type
   publishBatch?(topic: string, messages: any[], options?: PublishOptions & BatchOptions): Promise<void>;
